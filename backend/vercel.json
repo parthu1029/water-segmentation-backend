@@ -3,9 +3,6 @@
   "builds": [
     { "src": "app/main.py", "use": "@vercel/python" }
   ],
-  "functions": {
-    "app/main.py": { "runtime": "python3.11", "memory": 1024, "maxDuration": 60 }
-  },
   "routes": [
     { "src": "/(.*)", "dest": "app/main.py" }
   ]

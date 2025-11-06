@@ -87,9 +87,14 @@ async def predict_waterbody(geojson: Dict[str, Any]):
         acquisition_date = dl.get('acquisition_date')
         resolution = 10  # meters, keep in sync with sentinel service
 
-        # 2. Try model inference if model is available
+        # 2. Try model inference if model is available and RGB GeoTIFF is available
         mask = None
-        if model_inference.model is not None:
+        if (
+            model_inference.model is not None
+            and RASTERIO_AVAILABLE
+            and rgb_tif_path
+            and os.path.exists(rgb_tif_path)
+        ):
             print("Preprocessing image for model...")
             processed_image = model_inference.preprocess_image(rgb_tif_path)
             print("Running model inference...")
