@@ -11,3 +11,4 @@ pydantic-settings>=2.2.1
 pillow==9.5.0
 pyproj==3.6.1
 psycopg2-binary==2.9.9
+mangum==0.18.0
