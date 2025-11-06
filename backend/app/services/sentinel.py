@@ -18,9 +18,32 @@ from sentinelhub import (
     bbox_to_dimensions,
     SHConfig
 )
-from shapely.geometry import shape as shp_shape
+try:
+    from shapely.geometry import shape as shp_shape
+    SHAPELY_AVAILABLE = True
+except Exception:
+    shp_shape = None
+    SHAPELY_AVAILABLE = False
 from datetime import datetime, timedelta
 from PIL import Image
+
+def _bounds_from_geojson(geometry_geojson):
+    """Compute (minx, miny, maxx, maxy) from a Polygon/MultiPolygon GeoJSON without Shapely.
+    Assumes coordinates are in lon/lat order (EPSG:4326).
+    """
+    def _flatten(coords):
+        for c in coords:
+            if isinstance(c[0], (float, int)) and isinstance(c[1], (float, int)):
+                yield c
+            else:
+                yield from _flatten(c)
+
+    coords = list(_flatten(geometry_geojson.get('coordinates', [])))
+    if not coords:
+        raise ValueError('Invalid geometry: no coordinates')
+    lons = [c[0] for c in coords]
+    lats = [c[1] for c in coords]
+    return (min(lons), min(lats), max(lons), max(lats))
 
 class SentinelHubService:
     """Service for interacting with Sentinel Hub API"""
@@ -52,9 +75,12 @@ class SentinelHubService:
         Returns:
             dict containing paths and bounds for overlay
         """
-        # Convert geojson to shapely geometry
-        geom = shp_shape(geometry_geojson)
-        minx, miny, maxx, maxy = geom.bounds
+        # Compute bounds (prefer Shapely if available)
+        if SHAPELY_AVAILABLE and shp_shape is not None:
+            geom = shp_shape(geometry_geojson)
+            minx, miny, maxx, maxy = geom.bounds
+        else:
+            minx, miny, maxx, maxy = _bounds_from_geojson(geometry_geojson)
 
         # Convert to Sentinel Hub BBox
         bbox_sh = BBox(bbox=(minx, miny, maxx, maxy), crs=CRS.WGS84)

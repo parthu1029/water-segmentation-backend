@@ -3,7 +3,6 @@ import uuid
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, status
 from typing import Dict, Any
-from shapely.geometry import shape as shp_shape
 import numpy as np
 try:
     import rasterio
@@ -11,6 +10,12 @@ try:
 except Exception:
     rasterio = None
     RASTERIO_AVAILABLE = False
+try:
+    from shapely.geometry import shape as shp_shape
+    SHAPELY_AVAILABLE = True
+except Exception:
+    shp_shape = None
+    SHAPELY_AVAILABLE = False
 from fastapi.responses import FileResponse
 
 from ....core.config import settings
@@ -119,9 +124,25 @@ async def predict_waterbody(geojson: Dict[str, Any]):
         # Total polygon area using geodesic area
         try:
             from pyproj import Geod
-            geom = shp_shape(geometry)
+            # Get lon/lat arrays from geometry with or without Shapely
+            if SHAPELY_AVAILABLE and shp_shape is not None:
+                geom = shp_shape(geometry)
+                if geom.geom_type == 'Polygon':
+                    lon, lat = geom.exterior.coords.xy
+                else:
+                    lon, lat = geom.geoms[0].exterior.coords.xy
+                lon = list(lon)
+                lat = list(lat)
+            else:
+                coords = geometry.get('coordinates', [])
+                ring = []
+                if geometry.get('type') == 'Polygon' and coords:
+                    ring = coords[0]
+                elif geometry.get('type') == 'MultiPolygon' and coords:
+                    ring = coords[0][0]
+                lon = [p[0] for p in ring]
+                lat = [p[1] for p in ring]
             geod = Geod(ellps="WGS84")
-            lon, lat = geom.exterior.coords.xy if geom.geom_type == 'Polygon' else geom.geoms[0].exterior.coords.xy
             area, _ = geod.polygon_area_perimeter(lon, lat)
             total_area_km2 = abs(area) / 1e6
         except Exception:
