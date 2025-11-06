@@ -25,7 +25,12 @@ except Exception:
     shp_shape = None
     SHAPELY_AVAILABLE = False
 from datetime import datetime, timedelta
-from PIL import Image
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except Exception:
+    Image = None
+    PIL_AVAILABLE = False
 
 def _bounds_from_geojson(geometry_geojson):
     """Compute (minx, miny, maxx, maxy) from a Polygon/MultiPolygon GeoJSON without Shapely.
@@ -289,14 +294,17 @@ class SentinelHubService:
                     dst.write(ndwi_data[:, :, 0], 1)
 
             # Save a PNG quicklook for overlay (scale 0-255, apply alpha)
-            rgb_png_path = os.path.join(output_dir, 'sentinel_rgb.png')
-            rgb_uint8 = np.clip(rgb_data[:, :, :3] * 255.0, 0, 255).astype(np.uint8)
-            alpha_uint8 = np.clip(rgb_data[:, :, 3] * 255.0, 0, 255).astype(np.uint8)
-            rgba = np.dstack([rgb_uint8, alpha_uint8])
-            Image.fromarray(rgba, mode='RGBA').save(rgb_png_path)
+            rgb_png_path = None
+            rgb_jpg_path = None
+            if PIL_AVAILABLE and Image is not None:
+                rgb_png_path = os.path.join(output_dir, 'sentinel_rgb.png')
+                rgb_uint8 = np.clip(rgb_data[:, :, :3] * 255.0, 0, 255).astype(np.uint8)
+                alpha_uint8 = np.clip(rgb_data[:, :, 3] * 255.0, 0, 255).astype(np.uint8)
+                rgba = np.dstack([rgb_uint8, alpha_uint8])
+                Image.fromarray(rgba, mode='RGBA').save(rgb_png_path)
 
-            rgb_jpg_path = os.path.join(output_dir, 'sentinel_rgb.jpg')
-            Image.fromarray(rgb_uint8, mode='RGB').save(rgb_jpg_path, format='JPEG', quality=95, subsampling=0, optimize=True)
+                rgb_jpg_path = os.path.join(output_dir, 'sentinel_rgb.jpg')
+                Image.fromarray(rgb_uint8, mode='RGB').save(rgb_jpg_path, format='JPEG', quality=95, subsampling=0, optimize=True)
 
             # Always save NDWI as .npy for environments without rasterio
             ndwi_npy_path = os.path.join(output_dir, 'ndwi.npy')

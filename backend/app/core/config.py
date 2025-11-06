@@ -55,6 +55,10 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# Create necessary directories
-os.makedirs(settings.INPUT_DIR, exist_ok=True)
-os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
+# Create necessary directories, but don't crash if filesystem is read-only
+try:
+    os.makedirs(settings.INPUT_DIR, exist_ok=True)
+    os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
+except Exception as e:
+    # Avoid crashing on serverless read-only FS; main will try again for /tmp paths
+    print(f"DATA_DIR create warning: {e}")

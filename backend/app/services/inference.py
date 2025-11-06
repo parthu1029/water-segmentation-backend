@@ -11,7 +11,12 @@ try:
 except Exception:
     rasterio = None
     RASTERIO_AVAILABLE = False
-from PIL import Image
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except Exception:
+    Image = None
+    PIL_AVAILABLE = False
 import io
 
 class ModelInference:
@@ -132,6 +137,8 @@ class ModelInference:
             output_path: Path to save the output PNG
         """
         try:
+            if not PIL_AVAILABLE or Image is None:
+                raise RuntimeError("Pillow (PIL) is not available to save PNG files")
             # Convert to uint8 and scale to 0-255
             mask_uint8 = (mask * 255).astype(np.uint8)
             
@@ -156,6 +163,8 @@ class ModelInference:
             color: RGBA tuple for water pixels
         """
         try:
+            if not PIL_AVAILABLE or Image is None:
+                raise RuntimeError("Pillow (PIL) is not available to save PNG files")
             m = mask.squeeze().astype(np.uint8)
             h, w = m.shape
             rgba = np.zeros((h, w, 4), dtype=np.uint8)
