@@ -1,7 +1,13 @@
 import os
 import numpy as np
-import rasterio
-from rasterio.transform import from_bounds
+try:
+    import rasterio
+    from rasterio.transform import from_bounds
+    RASTERIO_AVAILABLE = True
+except Exception:
+    rasterio = None
+    from_bounds = None
+    RASTERIO_AVAILABLE = False
 from sentinelhub import (
     CRS,
     BBox,
@@ -216,41 +222,45 @@ class SentinelHubService:
             rgb_data = data[0]  # H x W x 4 (R,G,B,mask) floats 0-1
             ndwi_data = data[1]  # H x W x 1 float NDWI
 
-            # Write GeoTIFFs with georeferencing
-            transform = from_bounds(minx, miny, maxx, maxy, width=rgb_data.shape[1], height=rgb_data.shape[0])
+            rgb_tif_path = None
+            ndwi_tif_path = None
 
-            rgb_tif_path = os.path.join(output_dir, 'sentinel_rgb.tif')
-            with rasterio.open(
-                rgb_tif_path,
-                'w',
-                driver='GTiff',
-                height=rgb_data.shape[0],
-                width=rgb_data.shape[1],
-                count=4,
-                dtype='float32',
-                crs='EPSG:4326',
-                transform=transform,
-            ) as dst:
-                # R,G,B
-                dst.write(rgb_data[:, :, 0], 1)
-                dst.write(rgb_data[:, :, 1], 2)
-                dst.write(rgb_data[:, :, 2], 3)
-                # Alpha as 0..1, store as float32 as well
-                dst.write(rgb_data[:, :, 3], 4)
+            # Write GeoTIFFs with georeferencing if rasterio is available
+            if RASTERIO_AVAILABLE and from_bounds is not None:
+                transform = from_bounds(minx, miny, maxx, maxy, width=rgb_data.shape[1], height=rgb_data.shape[0])
 
-            ndwi_tif_path = os.path.join(output_dir, 'ndwi.tif')
-            with rasterio.open(
-                ndwi_tif_path,
-                'w',
-                driver='GTiff',
-                height=ndwi_data.shape[0],
-                width=ndwi_data.shape[1],
-                count=1,
-                dtype='float32',
-                crs='EPSG:4326',
-                transform=transform,
-            ) as dst:
-                dst.write(ndwi_data[:, :, 0], 1)
+                rgb_tif_path = os.path.join(output_dir, 'sentinel_rgb.tif')
+                with rasterio.open(
+                    rgb_tif_path,
+                    'w',
+                    driver='GTiff',
+                    height=rgb_data.shape[0],
+                    width=rgb_data.shape[1],
+                    count=4,
+                    dtype='float32',
+                    crs='EPSG:4326',
+                    transform=transform,
+                ) as dst:
+                    # R,G,B
+                    dst.write(rgb_data[:, :, 0], 1)
+                    dst.write(rgb_data[:, :, 1], 2)
+                    dst.write(rgb_data[:, :, 2], 3)
+                    # Alpha as 0..1, store as float32 as well
+                    dst.write(rgb_data[:, :, 3], 4)
+
+                ndwi_tif_path = os.path.join(output_dir, 'ndwi.tif')
+                with rasterio.open(
+                    ndwi_tif_path,
+                    'w',
+                    driver='GTiff',
+                    height=ndwi_data.shape[0],
+                    width=ndwi_data.shape[1],
+                    count=1,
+                    dtype='float32',
+                    crs='EPSG:4326',
+                    transform=transform,
+                ) as dst:
+                    dst.write(ndwi_data[:, :, 0], 1)
 
             # Save a PNG quicklook for overlay (scale 0-255, apply alpha)
             rgb_png_path = os.path.join(output_dir, 'sentinel_rgb.png')
@@ -262,11 +272,16 @@ class SentinelHubService:
             rgb_jpg_path = os.path.join(output_dir, 'sentinel_rgb.jpg')
             Image.fromarray(rgb_uint8, mode='RGB').save(rgb_jpg_path, format='JPEG', quality=95, subsampling=0, optimize=True)
 
+            # Always save NDWI as .npy for environments without rasterio
+            ndwi_npy_path = os.path.join(output_dir, 'ndwi.npy')
+            np.save(ndwi_npy_path, ndwi_data[:, :, 0])
+
             bounds = [[miny, minx], [maxy, maxx]]  # for Leaflet imageOverlay
 
             return {
                 'rgb_tif_path': rgb_tif_path,
                 'ndwi_tif_path': ndwi_tif_path,
+                'ndwi_npy_path': ndwi_npy_path,
                 'rgb_png_path': rgb_png_path,
                 'rgb_jpg_path': rgb_jpg_path,
                 'bounds': bounds,

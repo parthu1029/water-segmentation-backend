@@ -5,7 +5,6 @@ import os
 
 from .core.config import settings
 from .api.api_v1.api import api_router
-from .db.connection import init_db
 
 # Create necessary directories
 #os.makedirs(settings.INPUT_DIR, exist_ok=True)
@@ -45,6 +44,8 @@ async def root():
 @app.on_event("startup")
 def on_startup():
     try:
+      # Lazy import to avoid psycopg2 import errors during cold start if DB not configured
+      from .db.connection import init_db
       init_db()
     except Exception as e:
       # In debug, it's useful to see this in logs, but avoid crashing startup

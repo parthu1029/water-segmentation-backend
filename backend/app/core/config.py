@@ -8,6 +8,19 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
+def _compute_default_data_dir() -> str:
+    """Choose a writable data directory.
+    - Prefer DATA_DIR env if provided
+    - Use /tmp on serverless platforms (Vercel/AWS Lambda)
+    - Fallback to repo-local data/ for local/dev
+    """
+    base = os.getenv("DATA_DIR")
+    if base:
+        return base
+    if os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or os.getenv("AWS_EXECUTION_ENV"):
+        return "/tmp/data"
+    return os.path.join(str(Path(__file__).resolve().parents[2]), "data")
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(case_sensitive=True, env_file=".env")
     PROJECT_NAME: str = "Waterbody Segmentation API"
@@ -28,7 +41,7 @@ class Settings(BaseSettings):
     MODEL_PATH: str = os.getenv("MODEL_PATH", str(Path(__file__).resolve().parents[3] / "models" / "water_segmentation_model.h5"))
 
     # File storage
-    DATA_DIR: str = os.path.join(str(Path(__file__).resolve().parents[2]), "data")
+    DATA_DIR: str = _compute_default_data_dir()
     INPUT_DIR: str = os.path.join(DATA_DIR, "input")
     OUTPUT_DIR: str = os.path.join(DATA_DIR, "output")
 

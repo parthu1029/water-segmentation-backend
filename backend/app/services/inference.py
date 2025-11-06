@@ -5,7 +5,12 @@ try:
     tf = importlib.import_module("tensorflow")
 except Exception:
     tf = None
-import rasterio
+try:
+    import rasterio
+    RASTERIO_AVAILABLE = True
+except Exception:
+    rasterio = None
+    RASTERIO_AVAILABLE = False
 from PIL import Image
 import io
 
@@ -56,6 +61,10 @@ class ModelInference:
             Preprocessed image as a numpy array
         """
         try:
+            if tf is None:
+                raise RuntimeError("TensorFlow not available to preprocess image for model")
+            if not RASTERIO_AVAILABLE:
+                raise RuntimeError("rasterio not available to read GeoTIFF for model preprocessing")
             # Read the image using rasterio
             with rasterio.open(image_path) as src:
                 # Read the first 3 bands (RGB)
@@ -73,8 +82,6 @@ class ModelInference:
                 image = np.transpose(image, (1, 2, 0))
 
                 # Resize to model input size (requires TensorFlow)
-                if tf is None:
-                    raise RuntimeError("TensorFlow not available to preprocess image for model")
                 image = tf.image.resize(image, self.input_size)
 
                 # Add batch dimension

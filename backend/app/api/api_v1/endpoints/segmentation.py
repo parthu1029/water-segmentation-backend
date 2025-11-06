@@ -5,7 +5,12 @@ from fastapi import APIRouter, HTTPException, status
 from typing import Dict, Any
 from shapely.geometry import shape as shp_shape
 import numpy as np
-import rasterio
+try:
+    import rasterio
+    RASTERIO_AVAILABLE = True
+except Exception:
+    rasterio = None
+    RASTERIO_AVAILABLE = False
 from fastapi.responses import FileResponse
 
 from ....core.config import settings
@@ -69,8 +74,9 @@ async def predict_waterbody(geojson: Dict[str, Any]):
                 detail=str(ve)
             )
 
-        rgb_tif_path = dl['rgb_tif_path']
-        ndwi_tif_path = dl['ndwi_tif_path']
+        rgb_tif_path = dl.get('rgb_tif_path')
+        ndwi_tif_path = dl.get('ndwi_tif_path')
+        ndwi_npy_path = dl.get('ndwi_npy_path')
         rgb_png_path = dl['rgb_png_path']
         bounds = dl['bounds']
         acquisition_date = dl.get('acquisition_date')
@@ -87,10 +93,16 @@ async def predict_waterbody(geojson: Dict[str, Any]):
         else:
             print("Model not loaded, using NDWI threshold fallback...")
             # Read NDWI and threshold (e.g., > 0.2)
-            with rasterio.open(ndwi_tif_path) as src:
-                ndwi = src.read(1)
-                # -1 marks invalid from evalscript; ignore negatives by thresholding > 0.2
-                mask = (ndwi > 0.2).astype(np.uint8)
+            ndwi = None
+            if RASTERIO_AVAILABLE and ndwi_tif_path and os.path.exists(ndwi_tif_path):
+                with rasterio.open(ndwi_tif_path) as src:
+                    ndwi = src.read(1)
+            elif ndwi_npy_path and os.path.exists(ndwi_npy_path):
+                ndwi = np.load(ndwi_npy_path)
+            else:
+                raise RuntimeError("NDWI data not available for processing")
+            # -1 marks invalid from evalscript; ignore negatives by thresholding > 0.2
+            mask = (ndwi > 0.2).astype(np.uint8)
 
         # 3. Save mask overlay PNG (transparent background)
         mask_overlay_path = os.path.join(output_dir, 'water_mask.png')
@@ -122,8 +134,8 @@ async def predict_waterbody(geojson: Dict[str, Any]):
         rgb_url = f"/static/{request_id}/sentinel_rgb.png"
         rgb_jpg_url = f"/static/{request_id}/sentinel_rgb.jpg"
         mask_url = f"/static/{request_id}/water_mask.png"
-        rgb_tif_url = f"/static/{request_id}/sentinel_rgb.tif"
-        ndwi_tif_url = f"/static/{request_id}/ndwi.tif"
+        rgb_tif_url = f"/static/{request_id}/sentinel_rgb.tif" if rgb_tif_path and os.path.exists(rgb_tif_path) else None
+        ndwi_tif_url = f"/static/{request_id}/ndwi.tif" if ndwi_tif_path and os.path.exists(ndwi_tif_path) else None
 
         return {
             'status': 'success',
