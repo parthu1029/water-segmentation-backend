@@ -1,6 +1,7 @@
 import os
 import psycopg2
 import psycopg2.extras as extras
+from psycopg2 import errorcodes
 from typing import Optional, Dict, Any, Tuple
 
 from ..core.config import settings
@@ -30,50 +31,64 @@ def get_connection():
 
 def init_db():
     """Create required tables if they do not exist."""
-    ddl = """
-    CREATE TABLE IF NOT EXISTS rois (
-        roi_id UUID PRIMARY KEY,
-        geometry JSONB NOT NULL,
-        properties JSONB,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS jobs (
-        request_id TEXT PRIMARY KEY,
-        payload JSONB,
-        results JSONB,
-        error TEXT,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS artifacts (
-        request_id TEXT NOT NULL,
-        filename TEXT NOT NULL,
-        content BYTEA NOT NULL,
-        content_type TEXT,
-        created_at TIMESTAMPTZ DEFAULT NOW(),
-        PRIMARY KEY (request_id, filename)
-    );
-
-    CREATE TABLE IF NOT EXISTS logs (
-        id BIGSERIAL PRIMARY KEY,
-        ts TIMESTAMPTZ DEFAULT NOW(),
-        level TEXT,
-        name TEXT,
-        message TEXT,
-        pathname TEXT,
-        lineno INT,
-        funcname TEXT,
-        request_id TEXT,
-        extra JSONB
-    );
-    """
+    statements = [
+        (
+            """
+            CREATE TABLE IF NOT EXISTS rois (
+                roi_id UUID PRIMARY KEY,
+                geometry JSONB NOT NULL,
+                properties JSONB,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+            """
+        ),
+        (
+            """
+            CREATE TABLE IF NOT EXISTS jobs (
+                request_id TEXT PRIMARY KEY,
+                payload JSONB,
+                results JSONB,
+                error TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+            """
+        ),
+        (
+            """
+            CREATE TABLE IF NOT EXISTS artifacts (
+                request_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                content BYTEA NOT NULL,
+                content_type TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY (request_id, filename)
+            )
+            """
+        ),
+        (
+            """
+            CREATE TABLE IF NOT EXISTS logs (
+                id BIGSERIAL PRIMARY KEY,
+                ts TIMESTAMPTZ DEFAULT NOW(),
+                level TEXT,
+                name TEXT,
+                message TEXT,
+                pathname TEXT,
+                lineno INT,
+                funcname TEXT,
+                request_id TEXT,
+                extra JSONB
+            )
+            """
+        ),
+    ]
     conn = None
     try:
         conn = get_connection()
         with conn:
             with conn.cursor() as cur:
-                cur.execute(ddl)
+                for stmt in statements:
+                    cur.execute(stmt)
     finally:
         if conn is not None:
             conn.close()
@@ -189,21 +204,36 @@ def insert_log(level: str, name: str, message: str, pathname: str, lineno: int, 
     INSERT INTO logs (level, name, message, pathname, lineno, funcname, request_id, extra)
     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     """
-    conn = None
-    try:
-        conn = get_connection()
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (
-                    level,
-                    name,
-                    message,
-                    pathname,
-                    int(lineno),
-                    funcname,
-                    request_id,
-                    extras.Json(extra or {})
-                ))
-    finally:
-        if conn is not None:
-            conn.close()
+    for _ in range(2):
+        conn = None
+        try:
+            conn = get_connection()
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (
+                        level,
+                        name,
+                        message,
+                        pathname,
+                        int(lineno),
+                        funcname,
+                        request_id,
+                        extras.Json(extra or {})
+                    ))
+            return
+        except Exception as e:
+            try:
+                code = getattr(e, 'pgcode', None)
+            except Exception:
+                code = None
+            if code == errorcodes.UNDEFINED_TABLE:
+                try:
+                    init_db()
+                except Exception:
+                    pass
+                continue
+            else:
+                break
+        finally:
+            if conn is not None:
+                conn.close()
