@@ -171,6 +171,8 @@ async def predict_waterbody(geojson: Dict[str, Any]):
                     pass
             rgb_url = f"/static/{request_id}/sentinel_rgb.png" if rgb_png_path and os.path.exists(rgb_png_path) or settings.STORE_IN_DB else None
             rgb_jpg_url = f"/static/{request_id}/sentinel_rgb.jpg" if rgb_jpg_path and os.path.exists(rgb_jpg_path) or (settings.STORE_IN_DB and rgb_jpg_path) else None
+            if rgb_url is None and rgb_jpg_url is not None:
+                rgb_url = rgb_jpg_url
             rgb_tif_url = f"/static/{request_id}/sentinel_rgb.tif" if rgb_tif_path and os.path.exists(rgb_tif_path) or settings.STORE_IN_DB else None
             ndwi_tif_url = f"/static/{request_id}/ndwi.tif" if ndwi_tif_path and os.path.exists(ndwi_tif_path) or settings.STORE_IN_DB else None
             resp = {
@@ -331,6 +333,8 @@ async def predict_waterbody(geojson: Dict[str, Any]):
         # 5. Build URLs for frontend
         rgb_url = f"/static/{request_id}/sentinel_rgb.png" if (rgb_png_path and os.path.exists(rgb_png_path)) or settings.STORE_IN_DB else None
         rgb_jpg_url = f"/static/{request_id}/sentinel_rgb.jpg" if (rgb_jpg_path and os.path.exists(rgb_jpg_path)) or (settings.STORE_IN_DB and rgb_jpg_path) else None
+        if rgb_url is None and rgb_jpg_url is not None:
+            rgb_url = rgb_jpg_url
         mask_url = f"/static/{request_id}/water_mask.png" if (overlay_saved and mask_overlay_path and os.path.exists(mask_overlay_path)) or (settings.STORE_IN_DB and overlay_saved) else None
         rgb_tif_url = f"/static/{request_id}/sentinel_rgb.tif" if (rgb_tif_path and os.path.exists(rgb_tif_path)) or settings.STORE_IN_DB else None
         ndwi_tif_url = f"/static/{request_id}/ndwi.tif" if (ndwi_tif_path and os.path.exists(ndwi_tif_path)) or settings.STORE_IN_DB else None

@@ -190,6 +190,26 @@ class SentinelHubService:
         }
         """
 
+        evalscript_alt = """
+        //VERSION=3
+        function setup() {
+            return {
+                input: ["B02", "B03", "B04", "B08", "dataMask"],
+                output: [
+                    { id: "default", bands: 4, sampleType: "FLOAT32" },
+                    { id: "ndwi", bands: 1, sampleType: "FLOAT32" }
+                ]
+            };
+        }
+        function evaluatePixel(s) {
+            let ndwi = (s.B03 - 0.5 * s.B08) / (s.B03 + s.B08 + 0.0001);
+            let r = 2.5 * s.B04;
+            let g = 2.5 * s.B03;
+            let b = 2.5 * s.B02;
+            return { default: [r, g, b, s.dataMask], ndwi: [ndwi] };
+        }
+        """
+
         def build_request(time_interval, cloud_value):
             max_cc_fraction = None
             if cloud_value is not None:
@@ -199,7 +219,36 @@ class SentinelHubService:
                 except Exception:
                     max_cc_fraction = None
             return SentinelHubRequest(
-                evalscript=evalscript,
+                evalscript=evalscript_alt,
+                input_data=[
+                    SentinelHubRequest.input_data(
+                        data_collection=DataCollection.SENTINEL2_L2A,
+                        time_interval=time_interval,
+                        mosaicking_order=MosaickingOrder.LEAST_CC,
+                        other_args={
+                            'dataFilter': { 'maxCloudCoverage': max_cc_fraction }
+                        } if (max_cc_fraction is not None) else None,
+                    )
+                ],
+                responses=[
+                    SentinelHubRequest.output_response('default', MimeType.TIFF),
+                    SentinelHubRequest.output_response('ndwi', MimeType.TIFF),
+                ],
+                bbox=bbox_sh,
+                size=size_px,
+                config=config,
+            )
+
+        def build_request_alt(time_interval, cloud_value):
+            max_cc_fraction = None
+            if cloud_value is not None:
+                try:
+                    v = max(0, min(100, int(cloud_value)))
+                    max_cc_fraction = v / 100.0
+                except Exception:
+                    max_cc_fraction = None
+            return SentinelHubRequest(
+                evalscript=evalscript_alt,
                 input_data=[
                     SentinelHubRequest.input_data(
                         data_collection=DataCollection.SENTINEL2_L2A,
@@ -301,8 +350,53 @@ class SentinelHubService:
 
         os.makedirs(output_dir, exist_ok=True)
 
-        rgb_data = data[0]  # H x W x 4 (R,G,B,alpha)
+        rgb_data = data[0]
         ndwi_data = data[1]  # H x W x 1
+
+        try:
+            const_alpha = float(np.mean((rgb_data[:, :, 3] > 0.01).astype(np.float32)))
+        except Exception:
+            const_alpha = 1.0
+        if const_alpha < 0.01:
+            try:
+                if date_iso:
+                    base_dt = datetime.fromisoformat(date_iso[:10]) if date_iso else datetime.utcnow()
+                    start_dt = base_dt - timedelta(days=30)
+                    ti = (start_dt.strftime('%Y-%m-%d'), base_dt.strftime('%Y-%m-%d'))
+                else:
+                    end_date = datetime.utcnow()
+                    start_dt = end_date - timedelta(days=30)
+                    ti = (start_dt.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
+                cc = max_cloud if (max_cloud is not None) else None
+                req2 = build_request_alt(ti, cc)
+                dd2 = req2.get_data()
+                if dd2 and len(dd2) >= 2 and dd2[0] is not None and dd2[1] is not None:
+                    rgb_data = dd2[0]
+                    ndwi_data = dd2[1]
+                    try:
+                        acquisition_date = ti[1]
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        # Prepare visualization RGB with contrast stretching (keep GeoTIFF data unmodified)
+        rgb_vis = rgb_data.copy()
+        alpha_coverage = None
+        try:
+            valid = (rgb_vis[:, :, 3] > 0.5)
+            if np.any(valid):
+                alpha_coverage = float(np.mean(valid))
+                for i in range(3):
+                    band = rgb_vis[:, :, i][valid]
+                    if band.size > 0:
+                        lo = float(np.percentile(band, 2))
+                        hi = float(np.percentile(band, 98))
+                        if hi > lo:
+                            v = (rgb_vis[:, :, i] - lo) / (hi - lo)
+                            rgb_vis[:, :, i] = np.clip(v, 0.0, 1.0)
+        except Exception:
+            pass
 
         # GeoTIFFs
         rgb_tif_path = None
@@ -353,14 +447,36 @@ class SentinelHubService:
         try:
             if PIL_AVAILABLE and Image is not None:
                 rgb_png_path = os.path.join(output_dir, 'sentinel_rgb.png')
-                rgb_uint8 = np.clip(rgb_data[:, :, :3] * 255.0, 0, 255).astype(np.uint8)
-                alpha_uint8 = np.clip(rgb_data[:, :, 3] * 255.0, 0, 255).astype(np.uint8)
+                rgb_uint8 = np.clip(rgb_vis[:, :, :3] * 255.0, 0, 255).astype(np.uint8)
+                alpha_uint8 = np.clip(rgb_vis[:, :, 3] * 255.0, 0, 255).astype(np.uint8)
                 rgba = np.dstack([rgb_uint8, alpha_uint8])
                 Image.fromarray(rgba, mode='RGBA').save(rgb_png_path)
                 rgb_jpg_path = os.path.join(output_dir, 'sentinel_rgb.jpg')
                 Image.fromarray(rgb_uint8, mode='RGB').save(rgb_jpg_path, format='JPEG', quality=95, subsampling=0, optimize=True)
         except Exception:
             pass
+
+        # If PNG is still missing, attempt WMS fallback (no PIL required)
+        if rgb_png_path is None or (alpha_coverage is not None and alpha_coverage < 0.05):
+            try:
+                # Choose a 15-day window ending on acquisition_date (or today)
+                if acquisition_date:
+                    try:
+                        end_dt = datetime.fromisoformat(acquisition_date[:10])
+                    except Exception:
+                        end_dt = datetime.utcnow()
+                else:
+                    end_dt = datetime.utcnow()
+                start_dt = end_dt - timedelta(days=15)
+                t_from = start_dt.strftime('%Y-%m-%d')
+                t_to = end_dt.strftime('%Y-%m-%d')
+                cc = max_cloud if (max_cloud is not None) else None
+                wms_png = self._process_wms_png((minx, miny, maxx, maxy), size_px[0], size_px[1], t_from, t_to, cc)
+                rgb_png_path = os.path.join(output_dir, 'sentinel_rgb.png')
+                with open(rgb_png_path, 'wb') as f:
+                    f.write(wms_png)
+            except Exception:
+                pass
 
         bounds = [[miny, minx], [maxy, maxx]]
         return {
@@ -381,7 +497,7 @@ class SentinelHubService:
             'REQUEST': 'GetMap',
             'LAYERS': '1_TRUE_COLOR',
             'FORMAT': 'image/png',
-            'TRANSPARENT': 'TRUE',
+            'TRANSPARENT': 'FALSE',
             'CRS': 'EPSG:4326',
             'BBOX': f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}",
             'WIDTH': str(int(max(1, width))),
