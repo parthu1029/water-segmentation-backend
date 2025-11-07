@@ -93,7 +93,7 @@ class SentinelHubService:
         if max_cloud is not None:
             try:
                 v = max(0, min(100, int(max_cloud)))
-                data_filter['maxCloudCoverage'] = v
+                data_filter['maxCloudCoverage'] = float(v) / 100.0
             except Exception:
                 pass
         payload = {
@@ -105,7 +105,7 @@ class SentinelHubService:
                 'data': [
                     {
                         'type': 'S2L2A',
-                        'dataFilter': data_filter,
+                        'dataFilter': data_filter
                     }
                 ]
             },
@@ -130,13 +130,12 @@ class SentinelHubService:
         with urlrequest.urlopen(req) as resp:
             return resp.read()
 
-    def _process_wms_png(self, bbox: tuple, width: int, height: int, time_from: str, time_to: str, max_cloud: int | None):
+    def _process_wms_png(self, bbox: tuple, width: int, height: int, time_from: str, time_to: str, max_cloud: int | None, evalscript: str | None = None):
         if urlrequest is None or urlparse is None:
             raise RuntimeError("urllib not available for HTTP requests")
         base = f"https://services.sentinel-hub.com/ogc/wms/{self.wms_instance}"
         params = {
             'REQUEST': 'GetMap',
-            'LAYERS': '1_TRUE_COLOR',
             'FORMAT': 'image/png',
             'TRANSPARENT': 'TRUE',
             'CRS': 'EPSG:4326',
@@ -144,6 +143,7 @@ class SentinelHubService:
             'WIDTH': str(int(max(1, width))),
             'HEIGHT': str(int(max(1, height))),
             'TIME': f"{time_from}/{time_to}",
+            'SHOWLOGO': 'false',
         }
         if max_cloud is not None:
             try:
@@ -151,6 +151,12 @@ class SentinelHubService:
                 params['MAXCC'] = str(v)
             except Exception:
                 pass
+        if evalscript:
+            # Provide custom rendering with alpha masking; omit LAYERS to avoid style conflicts
+            params['EVALSCRIPT'] = evalscript
+            params['MOSAICKING'] = 'ORBIT'
+        else:
+            params['LAYERS'] = '1_TRUE_COLOR'
         url = base + '?' + urlparse.urlencode(params)
         req = urlrequest.Request(url=url, headers={'Accept': 'image/png'})
         with urlrequest.urlopen(req) as resp:
@@ -188,29 +194,35 @@ class SentinelHubService:
         evalscript_truecolor = """
         //VERSION=3
         function setup() {
-            return { input: ["B02","B03","B04","B08","SCL","dataMask"], output: { bands: 4 } };
+            return { input: ["B02","B03","B04","B08","SCL","dataMask"], output: { bands: 4 }, mosaicking: "ORBIT" };
         }
-        function evaluatePixel(s) {
-            // Brightness + mild gamma to match SH visual true color
-            // Gain ~2.5 with gamma ~1/1.2, clamped to [0,1]
-            let r = Math.min(1.0, Math.pow(s.B04 * 2.5, 1.0/1.2));
-            let g = Math.min(1.0, Math.pow(s.B03 * 2.5, 1.0/1.2));
-            let b = Math.min(1.0, Math.pow(s.B02 * 2.5, 1.0/1.2));
-            // Mask clouds and ensure valid data only
-            let valid = s.SCL !== 3 && s.SCL !== 9 && s.SCL !== 10 && s.dataMask === 1;
-            return [r, g, b, valid ? 1 : 0];
+        function evaluatePixel(samples) {
+            for (var i = 0; i < samples.length; i++) {
+                var s = samples[i];
+                var valid = (s.SCL !== 0 && s.SCL !== 1 && s.SCL !== 3 && s.SCL !== 8 && s.SCL !== 9 && s.SCL !== 10 && s.SCL !== 11) && s.dataMask === 1;
+                if (valid) {
+                    var r = Math.min(1.0, Math.pow(s.B04 * 2.8, 1.0/1.3));
+                    var g = Math.min(1.0, Math.pow(s.B03 * 2.8, 1.0/1.3));
+                    var b = Math.min(1.0, Math.pow(s.B02 * 2.8, 1.0/1.3));
+                    return [r, g, b, 1.0];
+                }
+            }
+            return [0.0, 0.0, 0.0, 0.0];
         }
         """
         evalscript_overlay = """
         //VERSION=3
         function setup() {
-            return { input: ["B03","B08","SCL","dataMask"], output: { bands: 4 } };
+            return { input: ["B03","B08","SCL","dataMask"], output: { bands: 4 }, mosaicking: "ORBIT" };
         }
-        function evaluatePixel(s) {
-            let ndwi = (s.B03 - 0.5 * s.B08) / (s.B03 + s.B08 + 0.0001);
-            let valid = s.SCL !== 3 && s.SCL !== 9 && s.SCL !== 10 && s.dataMask === 1;
-            if (valid && ndwi > 0.2) {
-                return [0.0, 0.588, 1.0, 1.0];
+        function evaluatePixel(samples) {
+            for (var i = 0; i < samples.length; i++) {
+                var s = samples[i];
+                var ndwi = (s.B03 - 0.5 * s.B08) / (s.B03 + s.B08 + 0.0001);
+                var valid = (s.SCL !== 0 && s.SCL !== 1 && s.SCL !== 3 && s.SCL !== 8 && s.SCL !== 9 && s.SCL !== 10 && s.SCL !== 11) && s.dataMask === 1;
+                if (valid && ndwi > 0.2) {
+                    return [0.0, 0.588, 1.0, 1.0];
+                }
             }
             return [0.0, 0.0, 0.0, 0.0];
         }
@@ -272,7 +284,7 @@ class SentinelHubService:
                     # Fallback: public WMS GetMap for true color
                     if not got:
                         try:
-                            img = self._process_wms_png((minx, miny, maxx, maxy), width, height, t_from, t_to, cc)
+                            img = self._process_wms_png((minx, miny, maxx, maxy), width, height, t_from, t_to, cc, evalscript_truecolor)
                             os.makedirs(output_dir, exist_ok=True)
                             rgb_png_path = os.path.join(output_dir, 'sentinel_rgb.png')
                             with open(rgb_png_path, 'wb') as f:
