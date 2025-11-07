@@ -11,16 +11,13 @@ except Exception as e:
     rasterio = None
     from_bounds = None
     RASTERIO_AVAILABLE = False
-from sentinelhub import (
-    CRS,
-    BBox,
-    DataCollection,
-    MimeType,
-    MosaickingOrder,
-    SentinelHubRequest,
-    bbox_to_dimensions,
-    SHConfig
-)
+import json
+try:
+    import urllib.request as urlrequest
+    import urllib.parse as urlparse
+except Exception:
+    urlrequest = None
+    urlparse = None
 try:
     from shapely.geometry import shape as shp_shape
     SHAPELY_AVAILABLE = True
@@ -61,18 +58,74 @@ class SentinelHubService:
     """Service for interacting with Sentinel Hub API"""
 
     def __init__(self):
-        self.config = self._get_config()
+        self.client_id = os.getenv('SENTINEL_HUB_CLIENT_ID', '')
+        self.client_secret = os.getenv('SENTINEL_HUB_CLIENT_SECRET', '')
 
-    def _get_config(self):
-        """Initialize Sentinel Hub configuration with credentials"""
-        config = SHConfig()
-        config.sh_client_id = os.getenv('SENTINEL_HUB_CLIENT_ID', '')
-        config.sh_client_secret = os.getenv('SENTINEL_HUB_CLIENT_SECRET', '')
-
-        if not config.sh_client_id or not config.sh_client_secret:
+    def _get_token(self) -> str:
+        if not self.client_id or not self.client_secret:
             logger.warning("Sentinel Hub credentials not found. Set SENTINEL_HUB_CLIENT_ID and SENTINEL_HUB_CLIENT_SECRET.")
+        if urlrequest is None:
+            raise RuntimeError("urllib not available for HTTP requests")
+        data = urlparse.urlencode({
+            'grant_type': 'client_credentials',
+            'client_id': self.client_id,
+            'client_secret': self.client_secret,
+        }).encode()
+        req = urlrequest.Request(
+            url='https://services.sentinel-hub.com/oauth/token',
+            data=data,
+            headers={'Content-Type': 'application/x-www-form-urlencoded'}
+        )
+        with urlrequest.urlopen(req) as resp:
+            payload = json.loads(resp.read().decode('utf-8'))
+            return payload.get('access_token', '')
 
-        return config
+    def _process_png(self, token: str, bbox: tuple, width: int, height: int, evalscript: str, time_from: str, time_to: str, max_cloud: int | None):
+        if urlrequest is None:
+            raise RuntimeError("urllib not available for HTTP requests")
+        data_filter = {
+            'timeRange': { 'from': f"{time_from}T00:00:00Z", 'to': f"{time_to}T23:59:59Z" },
+            'mosaickingOrder': 'leastCC',
+        }
+        if max_cloud is not None:
+            try:
+                v = max(0, min(100, int(max_cloud)))
+                data_filter['maxCloudCoverage'] = v
+            except Exception:
+                pass
+        payload = {
+            'input': {
+                'bounds': {
+                    'bbox': [bbox[0], bbox[1], bbox[2], bbox[3]],
+                    'properties': { 'crs': 'http://www.opengis.net/def/crs/EPSG/0/4326' }
+                },
+                'data': [
+                    {
+                        'type': 'S2L2A',
+                        'dataFilter': data_filter,
+                    }
+                ]
+            },
+            'output': {
+                'width': int(max(1, width)),
+                'height': int(max(1, height)),
+                'responses': [
+                    { 'identifier': 'default', 'format': { 'type': 'image/png' } }
+                ]
+            },
+            'evalscript': evalscript
+        }
+        req = urlrequest.Request(
+            url='https://services.sentinel-hub.com/api/v1/process',
+            data=json.dumps(payload).encode('utf-8'),
+            headers={
+                'Authorization': f'Bearer {token}',
+                'Content-Type': 'application/json',
+                'Accept': 'image/png'
+            }
+        )
+        with urlrequest.urlopen(req) as resp:
+            return resp.read()
 
     async def download_sentinel_data(self, geometry_geojson, time_interval_days=(-30, 0), resolution=10, output_dir='.', date_iso: str | None = None, max_cloud: int | None = None, max_px: int | None = None):
         """
@@ -94,85 +147,49 @@ class SentinelHubService:
         else:
             minx, miny, maxx, maxy = _bounds_from_geojson(geometry_geojson)
 
-        # Convert to Sentinel Hub BBox
-        bbox_sh = BBox(bbox=(minx, miny, maxx, maxy), crs=CRS.WGS84)
-
-        # Calculate image size in pixels
-        dims = bbox_to_dimensions(bbox_sh, resolution=resolution)
+        # Compute output size proportionally to bbox extent, clamped by max_px
+        dx = maxx - minx
+        dy = maxy - miny
         limit = 2500 if (max_px is None or int(max_px) <= 0) else int(max_px)
-        scale = (max(dims) / float(limit)) if max(dims) > limit else 1.0
-        size_px = (max(1, int(round(dims[0] / scale))), max(1, int(round(dims[1] / scale))))
+        denom = max(dx, dy) if max(dx, dy) > 0 else 1.0
+        width = max(1, int(round(limit * (dx / denom))))
+        height = max(1, int(round(limit * (dy / denom))))
 
         # Define the evalscript for true color RGB + NDWI
-        evalscript = """
+        evalscript_truecolor = """
         //VERSION=3
         function setup() {
-            return {
-                input: ["B02", "B03", "B04", "B08", "SCL", "dataMask"],
-                output: [
-                    { id: "default", bands: 4, sampleType: "FLOAT32" },
-                    { id: "ndwi", bands: 1, sampleType: "FLOAT32" }
-                ]
-            };
+            return { input: ["B02","B03","B04","B08","SCL","dataMask"], output: { bands: 4 } };
         }
-
-        function evaluatePixel(sample) {
-            // Calculate NDWI
-            let ndwi = (sample.B03 - 0.5 * sample.B08) / (sample.B03 + sample.B08 + 0.0001);
-
-            // Mask clouds and cloud shadows using SCL
-            let valid = sample.SCL !== 3 && sample.SCL !== 9 && sample.SCL !== 10 && sample.dataMask === 1;
-
-            // Return RGB + NDWI + mask
-            return {
-                default: [sample.B04, sample.B03, sample.B02, valid ? 1 : 0],
-                ndwi: [valid ? ndwi : -1]
-            };
+        function evaluatePixel(s) {
+            let valid = s.SCL !== 3 && s.SCL !== 9 && s.SCL !== 10 && s.dataMask === 1;
+            return [s.B04, s.B03, s.B02, valid ? 1 : 0];
+        }
+        """
+        evalscript_overlay = """
+        //VERSION=3
+        function setup() {
+            return { input: ["B03","B08","SCL","dataMask"], output: { bands: 4 } };
+        }
+        function evaluatePixel(s) {
+            let ndwi = (s.B03 - 0.5 * s.B08) / (s.B03 + s.B08 + 0.0001);
+            let valid = s.SCL !== 3 && s.SCL !== 9 && s.SCL !== 10 && s.dataMask === 1;
+            if (valid && ndwi > 0.2) {
+                return [0.0, 0.588, 1.0, 1.0];
+            }
+            return [0.0, 0.0, 0.0, 0.0];
         }
         """
 
-        # Helper to build request for a given time interval and cloud threshold
-        def build_request(time_interval, cloud_value):
-            max_cc_fraction = None
-            if cloud_value is not None:
-                try:
-                    v = max(0, min(100, int(cloud_value)))
-                    max_cc_fraction = v / 100.0
-                except Exception:
-                    max_cc_fraction = None
-            return SentinelHubRequest(
-                evalscript=evalscript,
-                input_data=[
-                    SentinelHubRequest.input_data(
-                        data_collection=DataCollection.SENTINEL2_L2A,
-                        time_interval=time_interval,
-                        mosaicking_order=MosaickingOrder.LEAST_CC,
-                        other_args={
-                            'dataFilter': {
-                                'maxCloudCoverage': max_cc_fraction
-                            }
-                        } if (max_cc_fraction is not None) else None,
-                    )
-                ],
-                responses=[
-                    SentinelHubRequest.output_response('default', MimeType.TIFF),
-                    SentinelHubRequest.output_response('ndwi', MimeType.TIFF)
-                ],
-                bbox=bbox_sh,
-                size=size_px,
-                config=self.config
-            )
-
+        token = self._get_token()
         acquisition_date = None
-        data = None
-
+        rgb_png_path = None
+        overlay_png_path = None
         if date_iso:
-            # Preferred end date is the provided date
             try:
                 base_dt = datetime.fromisoformat(date_iso[:10])
             except Exception:
                 base_dt = datetime.utcnow()
-
             window_days_candidates = [15, 30, 60]
             cloud_candidates = []
             if max_cloud is not None:
@@ -181,7 +198,6 @@ class SentinelHubService:
                 except Exception:
                     pass
             cloud_candidates += [80, 100]
-            # Remove dups, clamp to 0..100 preserving order
             seen = set()
             cc_list = []
             for v in cloud_candidates:
@@ -191,28 +207,29 @@ class SentinelHubService:
                 if vv not in seen:
                     seen.add(vv)
                     cc_list.append(vv)
-
-            # Try progressively wider windows and looser clouds
-            data = None
             for wd in window_days_candidates:
                 start_dt = base_dt - timedelta(days=wd)
-                time_interval_tuple = (start_dt.strftime('%Y-%m-%d'), base_dt.strftime('%Y-%m-%d'))
-                # If user didn't supply a cloud limit, try with 100 only
+                t_from = start_dt.strftime('%Y-%m-%d')
+                t_to = base_dt.strftime('%Y-%m-%d')
                 tries = cc_list if cc_list else [100]
                 for cc in tries:
                     try:
-                        request = build_request(time_interval_tuple, cc)
-                        dd = request.get_data()
-                        if dd and len(dd) >= 2 and dd[0] is not None and dd[1] is not None:
-                            data = dd
-                            acquisition_date = base_dt.strftime('%Y-%m-%d')
-                            break
+                        img = self._process_png(token, (minx, miny, maxx, maxy), width, height, evalscript_truecolor, t_from, t_to, cc)
+                        os.makedirs(output_dir, exist_ok=True)
+                        rgb_png_path = os.path.join(output_dir, 'sentinel_rgb.png')
+                        with open(rgb_png_path, 'wb') as f:
+                            f.write(img)
+                        ov = self._process_png(token, (minx, miny, maxx, maxy), width, height, evalscript_overlay, t_from, t_to, cc)
+                        overlay_png_path = os.path.join(output_dir, 'water_mask.png')
+                        with open(overlay_png_path, 'wb') as f:
+                            f.write(ov)
+                        acquisition_date = t_to
+                        break
                     except Exception:
                         continue
-                if data is not None:
+                if rgb_png_path:
                     break
         else:
-            # No specific date: use now as end and try windows 30 then 60 days
             end_date = datetime.utcnow()
             window_days_candidates = [30, 60]
             cloud_candidates = []
@@ -231,115 +248,39 @@ class SentinelHubService:
                 if vv not in seen:
                     seen.add(vv)
                     cc_list.append(vv)
-
-            data = None
             for wd in window_days_candidates:
                 start_date = end_date - timedelta(days=wd)
-                time_interval_tuple = (start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
+                t_from = start_date.strftime('%Y-%m-%d')
+                t_to = end_date.strftime('%Y-%m-%d')
                 tries = cc_list if cc_list else [100]
                 for cc in tries:
                     try:
-                        request = build_request(time_interval_tuple, cc)
-                        dd = request.get_data()
-                        if dd and len(dd) >= 2 and dd[0] is not None and dd[1] is not None:
-                            data = dd
-                            acquisition_date = end_date.strftime('%Y-%m-%d')
-                            break
+                        img = self._process_png(token, (minx, miny, maxx, maxy), width, height, evalscript_truecolor, t_from, t_to, cc)
+                        os.makedirs(output_dir, exist_ok=True)
+                        rgb_png_path = os.path.join(output_dir, 'sentinel_rgb.png')
+                        with open(rgb_png_path, 'wb') as f:
+                            f.write(img)
+                        ov = self._process_png(token, (minx, miny, maxx, maxy), width, height, evalscript_overlay, t_from, t_to, cc)
+                        overlay_png_path = os.path.join(output_dir, 'water_mask.png')
+                        with open(overlay_png_path, 'wb') as f:
+                            f.write(ov)
+                        acquisition_date = t_to
+                        break
                     except Exception:
                         continue
-                if data is not None:
+                if rgb_png_path:
                     break
 
-        # Validate data before proceeding
-        if not data or len(data) < 2 or data[0] is None or data[1] is None:
+        if not rgb_png_path:
             raise ValueError("No imagery found for the selected time window and cloud coverage filter.")
-
 
         try:
             os.makedirs(output_dir, exist_ok=True)
-
-            rgb_data = data[0]  # H x W x 4 (R,G,B,mask) floats 0-1
-            ndwi_data = data[1]  # H x W x 1 float NDWI
-
+            rgb_jpg_path = None
             rgb_tif_path = None
             ndwi_tif_path = None
-
-            # Write GeoTIFFs with georeferencing if rasterio is available
-            if RASTERIO_AVAILABLE and from_bounds is not None:
-                transform = from_bounds(minx, miny, maxx, maxy, width=rgb_data.shape[1], height=rgb_data.shape[0])
-
-                rgb_tif_path = os.path.join(output_dir, 'sentinel_rgb.tif')
-                with rasterio.open(
-                    rgb_tif_path,
-                    'w',
-                    driver='GTiff',
-                    height=rgb_data.shape[0],
-                    width=rgb_data.shape[1],
-                    count=4,
-                    dtype='float32',
-                    crs='EPSG:4326',
-                    transform=transform,
-                ) as dst:
-                    # R,G,B
-                    dst.write(rgb_data[:, :, 0], 1)
-                    dst.write(rgb_data[:, :, 1], 2)
-                    dst.write(rgb_data[:, :, 2], 3)
-                    # Alpha as 0..1, store as float32 as well
-                    dst.write(rgb_data[:, :, 3], 4)
-
-                ndwi_tif_path = os.path.join(output_dir, 'ndwi.tif')
-                with rasterio.open(
-                    ndwi_tif_path,
-                    'w',
-                    driver='GTiff',
-                    height=ndwi_data.shape[0],
-                    width=ndwi_data.shape[1],
-                    count=1,
-                    dtype='float32',
-                    crs='EPSG:4326',
-                    transform=transform,
-                ) as dst:
-                    dst.write(ndwi_data[:, :, 0], 1)
-
-            # Save a PNG quicklook for overlay (scale 0-255, apply alpha)
-            rgb_png_path = None
-            rgb_jpg_path = None
-            if PIL_AVAILABLE and Image is not None:
-                rgb_png_path = os.path.join(output_dir, 'sentinel_rgb.png')
-                rgb_uint8 = np.clip(rgb_data[:, :, :3] * 255.0, 0, 255).astype(np.uint8)
-                alpha_uint8 = np.clip(rgb_data[:, :, 3] * 255.0, 0, 255).astype(np.uint8)
-                rgba = np.dstack([rgb_uint8, alpha_uint8])
-                Image.fromarray(rgba, mode='RGBA').save(rgb_png_path)
-
-                # Save JPEG only if libjpeg is supported by Pillow; otherwise skip
-                PIL_has_jpeg = False
-                try:
-                    if PIL_features is not None:
-                        # Pillow feature key is 'jpg' or 'jpeg'; prefer 'jpg'
-                        PIL_has_jpeg = bool(PIL_features.check('jpg') or PIL_features.check('jpg_2000') or PIL_features.check('jpg2000'))
-                except Exception:
-                    PIL_has_jpeg = False
-                if PIL_has_jpeg:
-                    try:
-                        rgb_jpg_path = os.path.join(output_dir, 'sentinel_rgb.jpg')
-                        Image.fromarray(rgb_uint8, mode='RGB').save(
-                            rgb_jpg_path,
-                            format='JPEG',
-                            quality=95,
-                            subsampling=0,
-                            optimize=True,
-                        )
-                    except Exception as je:
-                        logger.warning(f"JPEG save failed (continuing without JPG): {je}")
-                        rgb_jpg_path = None
-                else:
-                    rgb_jpg_path = None
-
-            # Always save NDWI as .npy for environments without rasterio
-            ndwi_npy_path = os.path.join(output_dir, 'ndwi.npy')
-            np.save(ndwi_npy_path, ndwi_data[:, :, 0])
-
-            bounds = [[miny, minx], [maxy, maxx]]  # for Leaflet imageOverlay
+            ndwi_npy_path = None
+            bounds = [[miny, minx], [maxy, maxx]]
 
             return {
                 'rgb_tif_path': rgb_tif_path,
@@ -349,6 +290,7 @@ class SentinelHubService:
                 'rgb_jpg_path': rgb_jpg_path,
                 'bounds': bounds,
                 'acquisition_date': acquisition_date,
+                'overlay_png_path': overlay_png_path,
             }
 
         except Exception as e:

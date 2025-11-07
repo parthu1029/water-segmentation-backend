@@ -215,57 +215,70 @@ async def predict_waterbody(geojson: Dict[str, Any]):
         ndwi_npy_path = dl.get('ndwi_npy_path')
         rgb_png_path = dl.get('rgb_png_path')
         rgb_jpg_path = dl.get('rgb_jpg_path')
+        overlay_from_service = dl.get('overlay_png_path')
         bounds = dl['bounds']
         acquisition_date = dl.get('acquisition_date')
         resolution = 10  # meters, keep in sync with sentinel service
 
-        # 2. Try model inference if model is available and RGB GeoTIFF is available
+        # 2. If overlay already provided by service, use it; otherwise try model/NDWI paths
         mask = None
-        if get_model_inference().model is not None and rgb_tif_path and os.path.exists(rgb_tif_path):
-            try:
-                logger.info("Preprocessing image for model...")
-                processed_image = get_model_inference().preprocess_image(rgb_tif_path)
-                logger.info("Running model inference...")
-                mask = get_model_inference().predict(processed_image)
-                mask = (mask.squeeze() > 0).astype(np.uint8)
-            except Exception as e:
-                logger.warning(f"Model inference not available, falling back to NDWI: {e}")
-                mask = None
-
-        if mask is None:
-            logger.info("Using NDWI threshold fallback...")
-            # Read NDWI and threshold (e.g., > 0.2)
-            ndwi = None
-            if ndwi_tif_path and os.path.exists(ndwi_tif_path):
-                try:
-                    rasterio = importlib.import_module("rasterio")
-                    with rasterio.open(ndwi_tif_path) as src:
-                        ndwi = src.read(1)
-                except Exception:
-                    ndwi = None
-            if ndwi is None and ndwi_npy_path and os.path.exists(ndwi_npy_path):
-                ndwi = np.load(ndwi_npy_path)
-            if ndwi is None:
-                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="NDWI data not available for processing")
-            # -1 marks invalid from evalscript; ignore negatives by thresholding > 0.2
-            mask = (ndwi > 0.2).astype(np.uint8)
-
-        # 3. Save mask overlay PNG (transparent background)
-        mask_overlay_path = os.path.join(output_dir, 'water_mask.png')
+        mask_overlay_path = None
         overlay_saved = False
-        try:
-            get_model_inference().save_mask_as_overlay_png(mask, mask_overlay_path, color=(0, 150, 255, 255))
+        if overlay_from_service and os.path.exists(overlay_from_service):
+            mask_overlay_path = overlay_from_service
             overlay_saved = True
-        except Exception as _e:
-            overlay_saved = False
+        else:
+            if get_model_inference().model is not None and rgb_tif_path and os.path.exists(rgb_tif_path):
+                try:
+                    logger.info("Preprocessing image for model...")
+                    processed_image = get_model_inference().preprocess_image(rgb_tif_path)
+                    logger.info("Running model inference...")
+                    mask = get_model_inference().predict(processed_image)
+                    mask = (mask.squeeze() > 0).astype(np.uint8)
+                except Exception as e:
+                    logger.warning(f"Model inference not available, falling back to NDWI: {e}")
+                    mask = None
+
+            if mask is None:
+                logger.info("Using NDWI threshold fallback...")
+                ndwi = None
+                if ndwi_tif_path and os.path.exists(ndwi_tif_path):
+                    try:
+                        rasterio = importlib.import_module("rasterio")
+                        with rasterio.open(ndwi_tif_path) as src:
+                            ndwi = src.read(1)
+                    except Exception:
+                        ndwi = None
+                if ndwi is None and ndwi_npy_path and os.path.exists(ndwi_npy_path):
+                    ndwi = np.load(ndwi_npy_path)
+                if ndwi is not None:
+                    mask = (ndwi > 0.2).astype(np.uint8)
+                else:
+                    # No NDWI data available; will proceed without mask generation
+                    mask = None
+
+        # 3. Save mask overlay PNG from computed mask if needed
+        if mask_overlay_path is None and mask is not None:
+            mask_overlay_path = os.path.join(output_dir, 'water_mask.png')
+            try:
+                get_model_inference().save_mask_as_overlay_png(mask, mask_overlay_path, color=(0, 150, 255, 255))
+                overlay_saved = True
+            except Exception as _e:
+                overlay_saved = False
 
         # 4. Compute statistics
         # Water area from mask pixel count and pixel size
-        water_pixels = int(mask.sum())
-        total_pixels = int(mask.size)
         pixel_area_km2 = (resolution * resolution) / 1e6
-        water_area_km2 = water_pixels * pixel_area_km2
-        total_mask_area_km2 = total_pixels * pixel_area_km2
+        if mask is not None:
+            water_pixels = int(mask.sum())
+            total_pixels = int(mask.size)
+            water_area_km2 = water_pixels * pixel_area_km2
+            total_mask_area_km2 = total_pixels * pixel_area_km2
+        else:
+            water_pixels = 0
+            total_pixels = 0
+            water_area_km2 = 0.0
+            total_mask_area_km2 = 0.0
 
         # Total polygon area using geodesic area
         try:
@@ -296,7 +309,7 @@ async def predict_waterbody(geojson: Dict[str, Any]):
                 if rgb_jpg_path and os.path.exists(rgb_jpg_path):
                     with open(rgb_jpg_path, 'rb') as f:
                         insert_artifact(request_id, 'sentinel_rgb.jpg', f.read(), 'image/jpeg')
-                if overlay_saved and os.path.exists(mask_overlay_path):
+                if overlay_saved and mask_overlay_path and os.path.exists(mask_overlay_path):
                     with open(mask_overlay_path, 'rb') as f:
                         insert_artifact(request_id, 'water_mask.png', f.read(), 'image/png')
                 if rgb_tif_path and os.path.exists(rgb_tif_path):
@@ -316,11 +329,11 @@ async def predict_waterbody(geojson: Dict[str, Any]):
                 pass
 
         # 5. Build URLs for frontend
-        rgb_url = f"/static/{request_id}/sentinel_rgb.png" if rgb_png_path and os.path.exists(rgb_png_path) or settings.STORE_IN_DB else None
-        rgb_jpg_url = f"/static/{request_id}/sentinel_rgb.jpg" if rgb_jpg_path and os.path.exists(rgb_jpg_path) or (settings.STORE_IN_DB and rgb_jpg_path) else None
-        mask_url = f"/static/{request_id}/water_mask.png" if overlay_saved and os.path.exists(mask_overlay_path) or (settings.STORE_IN_DB and overlay_saved) else None
-        rgb_tif_url = f"/static/{request_id}/sentinel_rgb.tif" if rgb_tif_path and os.path.exists(rgb_tif_path) or settings.STORE_IN_DB else None
-        ndwi_tif_url = f"/static/{request_id}/ndwi.tif" if ndwi_tif_path and os.path.exists(ndwi_tif_path) or settings.STORE_IN_DB else None
+        rgb_url = f"/static/{request_id}/sentinel_rgb.png" if (rgb_png_path and os.path.exists(rgb_png_path)) or settings.STORE_IN_DB else None
+        rgb_jpg_url = f"/static/{request_id}/sentinel_rgb.jpg" if (rgb_jpg_path and os.path.exists(rgb_jpg_path)) or (settings.STORE_IN_DB and rgb_jpg_path) else None
+        mask_url = f"/static/{request_id}/water_mask.png" if (overlay_saved and mask_overlay_path and os.path.exists(mask_overlay_path)) or (settings.STORE_IN_DB and overlay_saved) else None
+        rgb_tif_url = f"/static/{request_id}/sentinel_rgb.tif" if (rgb_tif_path and os.path.exists(rgb_tif_path)) or settings.STORE_IN_DB else None
+        ndwi_tif_url = f"/static/{request_id}/ndwi.tif" if (ndwi_tif_path and os.path.exists(ndwi_tif_path)) or settings.STORE_IN_DB else None
 
         resp = {
             'status': 'success',
