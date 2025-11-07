@@ -148,20 +148,25 @@ async def predict_waterbody(geojson: Dict[str, Any]):
             # Optionally store artifacts in DB
             if settings.STORE_IN_DB:
                 try:
+                    to_delete = []
                     if rgb_png_path and os.path.exists(rgb_png_path):
                         with open(rgb_png_path, 'rb') as f:
                             insert_artifact(request_id, 'sentinel_rgb.png', f.read(), 'image/png')
+                        to_delete.append(rgb_png_path)
                     if rgb_jpg_path and os.path.exists(rgb_jpg_path):
                         with open(rgb_jpg_path, 'rb') as f:
                             insert_artifact(request_id, 'sentinel_rgb.jpg', f.read(), 'image/jpeg')
+                        to_delete.append(rgb_jpg_path)
                     if rgb_tif_path and os.path.exists(rgb_tif_path):
                         with open(rgb_tif_path, 'rb') as f:
                             insert_artifact(request_id, 'sentinel_rgb.tif', f.read(), 'image/tiff')
+                        to_delete.append(rgb_tif_path)
                     if ndwi_tif_path and os.path.exists(ndwi_tif_path):
                         with open(ndwi_tif_path, 'rb') as f:
                             insert_artifact(request_id, 'ndwi.tif', f.read(), 'image/tiff')
-                    # Optionally remove local files to avoid persisting to disk when storing in DB
-                    for p in [rgb_png_path, rgb_jpg_path, rgb_tif_path, ndwi_tif_path]:
+                        to_delete.append(ndwi_tif_path)
+                    # Remove only files that were successfully inserted
+                    for p in to_delete:
                         try:
                             if p and os.path.exists(p):
                                 os.remove(p)
@@ -303,23 +308,29 @@ async def predict_waterbody(geojson: Dict[str, Any]):
         # Optionally store artifacts in DB
         if settings.STORE_IN_DB:
             try:
+                to_delete = []
                 if rgb_png_path and os.path.exists(rgb_png_path):
                     with open(rgb_png_path, 'rb') as f:
                         insert_artifact(request_id, 'sentinel_rgb.png', f.read(), 'image/png')
+                    to_delete.append(rgb_png_path)
                 if rgb_jpg_path and os.path.exists(rgb_jpg_path):
                     with open(rgb_jpg_path, 'rb') as f:
                         insert_artifact(request_id, 'sentinel_rgb.jpg', f.read(), 'image/jpeg')
+                    to_delete.append(rgb_jpg_path)
                 if overlay_saved and mask_overlay_path and os.path.exists(mask_overlay_path):
                     with open(mask_overlay_path, 'rb') as f:
                         insert_artifact(request_id, 'water_mask.png', f.read(), 'image/png')
+                    to_delete.append(mask_overlay_path)
                 if rgb_tif_path and os.path.exists(rgb_tif_path):
                     with open(rgb_tif_path, 'rb') as f:
                         insert_artifact(request_id, 'sentinel_rgb.tif', f.read(), 'image/tiff')
+                    to_delete.append(rgb_tif_path)
                 if ndwi_tif_path and os.path.exists(ndwi_tif_path):
                     with open(ndwi_tif_path, 'rb') as f:
                         insert_artifact(request_id, 'ndwi.tif', f.read(), 'image/tiff')
-                # Optionally remove local files to avoid persisting to disk when storing in DB
-                for p in [rgb_png_path, rgb_jpg_path, mask_overlay_path, rgb_tif_path, ndwi_tif_path]:
+                    to_delete.append(ndwi_tif_path)
+                # Remove only files that were successfully inserted
+                for p in to_delete:
                     try:
                         if p and os.path.exists(p):
                             os.remove(p)

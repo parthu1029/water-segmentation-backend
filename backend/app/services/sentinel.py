@@ -151,16 +151,22 @@ class SentinelHubService:
                 params['MAXCC'] = str(v)
             except Exception:
                 pass
+        # Use EVALSCRIPT when provided; otherwise default layer
         if evalscript:
-            # Provide custom rendering with alpha masking; omit LAYERS to avoid style conflicts
             params['EVALSCRIPT'] = evalscript
-            params['MOSAICKING'] = 'ORBIT'
         else:
             params['LAYERS'] = '1_TRUE_COLOR'
         url = base + '?' + urlparse.urlencode(params)
         req = urlrequest.Request(url=url, headers={'Accept': 'image/png'})
         with urlrequest.urlopen(req) as resp:
-            return resp.read()
+            data = resp.read()
+            # Basic sanity check: PNG magic header
+            try:
+                if not (isinstance(data, (bytes, bytearray)) and data.startswith(b"\x89PNG\r\n\x1a\n")):
+                    raise ValueError("WMS response is not a PNG image")
+            except Exception:
+                raise
+            return data
 
     async def download_sentinel_data(self, geometry_geojson, time_interval_days=(-30, 0), resolution=10, output_dir='.', date_iso: str | None = None, max_cloud: int | None = None, max_px: int | None = None):
         """
@@ -190,39 +196,30 @@ class SentinelHubService:
         width = max(1, int(round(limit * (dx / denom))))
         height = max(1, int(round(limit * (dy / denom))))
 
-        # Define the evalscript for true color RGB + NDWI
+        # Define the evalscript for true color RGB + NDWI (single-sample, brightened)
         evalscript_truecolor = """
         //VERSION=3
         function setup() {
-            return { input: ["B02","B03","B04","B08","SCL","dataMask"], output: { bands: 4 }, mosaicking: "ORBIT" };
+            return { input: ["B02","B03","B04","B08","dataMask"], output: { bands: 4 } };
         }
-        function evaluatePixel(samples) {
-            for (var i = 0; i < samples.length; i++) {
-                var s = samples[i];
-                var valid = (s.SCL !== 0 && s.SCL !== 1 && s.SCL !== 3 && s.SCL !== 8 && s.SCL !== 9 && s.SCL !== 10 && s.SCL !== 11) && s.dataMask === 1;
-                if (valid) {
-                    var r = Math.min(1.0, Math.pow(s.B04 * 2.8, 1.0/1.3));
-                    var g = Math.min(1.0, Math.pow(s.B03 * 2.8, 1.0/1.3));
-                    var b = Math.min(1.0, Math.pow(s.B02 * 2.8, 1.0/1.3));
-                    return [r, g, b, 1.0];
-                }
-            }
-            return [0.0, 0.0, 0.0, 0.0];
+        function evaluatePixel(s) {
+            let valid = s.dataMask === 1;
+            let r = Math.min(1.0, Math.pow(s.B04 * 2.5, 1.0/1.2));
+            let g = Math.min(1.0, Math.pow(s.B03 * 2.5, 1.0/1.2));
+            let b = Math.min(1.0, Math.pow(s.B02 * 2.5, 1.0/1.2));
+            return [r, g, b, valid ? 1 : 0];
         }
         """
         evalscript_overlay = """
         //VERSION=3
         function setup() {
-            return { input: ["B03","B08","SCL","dataMask"], output: { bands: 4 }, mosaicking: "ORBIT" };
+            return { input: ["B03","B08","dataMask"], output: { bands: 4 } };
         }
-        function evaluatePixel(samples) {
-            for (var i = 0; i < samples.length; i++) {
-                var s = samples[i];
-                var ndwi = (s.B03 - 0.5 * s.B08) / (s.B03 + s.B08 + 0.0001);
-                var valid = (s.SCL !== 0 && s.SCL !== 1 && s.SCL !== 3 && s.SCL !== 8 && s.SCL !== 9 && s.SCL !== 10 && s.SCL !== 11) && s.dataMask === 1;
-                if (valid && ndwi > 0.2) {
-                    return [0.0, 0.588, 1.0, 1.0];
-                }
+        function evaluatePixel(s) {
+            let ndwi = (s.B03 - 0.5 * s.B08) / (s.B03 + s.B08 + 0.0001);
+            let valid = s.dataMask === 1;
+            if (valid && ndwi > 0.2) {
+                return [0.0, 0.588, 1.0, 1.0];
             }
             return [0.0, 0.0, 0.0, 0.0];
         }
@@ -281,14 +278,21 @@ class SentinelHubService:
                             got = True
                         except Exception:
                             got = False
-                    # Fallback: public WMS GetMap for true color
+                    # Fallback: public WMS GetMap for true color (with evalscript)
                     if not got:
                         try:
-                            img = self._process_wms_png((minx, miny, maxx, maxy), width, height, t_from, t_to, cc, evalscript_truecolor)
+                            img = self._process_wms_png((minx, miny, maxx, maxy), width, height, t_from, t_to, cc, None)
                             os.makedirs(output_dir, exist_ok=True)
                             rgb_png_path = os.path.join(output_dir, 'sentinel_rgb.png')
                             with open(rgb_png_path, 'wb') as f:
                                 f.write(img)
+                            try:
+                                ov = self._process_wms_png((minx, miny, maxx, maxy), width, height, t_from, t_to, cc, evalscript_overlay)
+                                overlay_png_path = os.path.join(output_dir, 'water_mask.png')
+                                with open(overlay_png_path, 'wb') as f:
+                                    f.write(ov)
+                            except Exception:
+                                overlay_png_path = None
                             acquisition_date = t_to
                             got = True
                         except Exception:
@@ -343,11 +347,18 @@ class SentinelHubService:
                             got = False
                     if not got:
                         try:
-                            img = self._process_wms_png((minx, miny, maxx, maxy), width, height, t_from, t_to, cc)
+                            img = self._process_wms_png((minx, miny, maxx, maxy), width, height, t_from, t_to, cc, evalscript_truecolor)
                             os.makedirs(output_dir, exist_ok=True)
                             rgb_png_path = os.path.join(output_dir, 'sentinel_rgb.png')
                             with open(rgb_png_path, 'wb') as f:
                                 f.write(img)
+                            try:
+                                ov = self._process_wms_png((minx, miny, maxx, maxy), width, height, t_from, t_to, cc, evalscript_overlay)
+                                overlay_png_path = os.path.join(output_dir, 'water_mask.png')
+                                with open(overlay_png_path, 'wb') as f:
+                                    f.write(ov)
+                            except Exception:
+                                overlay_png_path = None
                             acquisition_date = t_to
                             got = True
                         except Exception:
