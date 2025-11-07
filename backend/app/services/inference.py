@@ -1,5 +1,6 @@
 import os
 import numpy as np
+import logging
 try:
     import importlib
     tf = importlib.import_module("tensorflow")
@@ -25,6 +26,8 @@ try:
 except Exception:
     urlrequest = None
 
+logger = logging.getLogger(__name__)
+
 class ModelInference:
     """Handles model loading and inference for water segmentation"""
     
@@ -46,7 +49,7 @@ class ModelInference:
         """Load the TensorFlow model"""
         try:
             if tf is None:
-                print("TensorFlow not available; skipping model load. Falling back to NDWI threshold.")
+                logger.warning("TensorFlow not available; skipping model load. Falling back to NDWI threshold.")
                 self.model = None
                 return
             local_path = self.model_path
@@ -64,20 +67,19 @@ class ModelInference:
                             req.add_header("Authorization", f"Bearer {token}")
                         with urlrequest.urlopen(req) as resp, open(local_path, "wb") as out:
                             out.write(resp.read())
-                        print(f"Downloaded model to {local_path}")
+                        logger.info(f"Downloaded model to {local_path}")
                 except Exception as de:
-                    print(f"Model download failed: {de}")
+                    logger.warning(f"Model download failed: {de}")
                     local_path = self.model_path
             if not os.path.exists(local_path):
-                print(f"Warning: Model not found at {local_path}")
+                logger.warning(f"Model not found at {local_path}")
                 return
             
             self.model = tf.keras.models.load_model(local_path, compile=False)
-            print(f"Model loaded successfully from {local_path}")
-            self.model.summary()
+            logger.info(f"Model loaded successfully from {local_path}")
             
         except Exception as e:
-            print(f"Error loading model: {str(e)}")
+            logger.exception(f"Error loading model: {str(e)}")
             self.model = None
     
     def preprocess_image(self, image_path):
@@ -120,7 +122,7 @@ class ModelInference:
                 return image
                 
         except Exception as e:
-            print(f"Error preprocessing image: {str(e)}")
+            logger.exception(f"Error preprocessing image: {str(e)}")
             raise
     
     def predict(self, image):
@@ -149,7 +151,7 @@ class ModelInference:
             return binary_mask
             
         except Exception as e:
-            print(f"Error during prediction: {str(e)}")
+            logger.exception(f"Error during prediction: {str(e)}")
             raise
     
     @staticmethod
@@ -171,10 +173,10 @@ class ModelInference:
             mask_image = Image.fromarray(mask_uint8.squeeze(), mode='L')
             mask_image.save(output_path, 'PNG')
             
-            print(f"Mask saved to {output_path}")
+            logger.info(f"Mask saved to {output_path}")
             
         except Exception as e:
-            print(f"Error saving mask: {str(e)}")
+            logger.exception(f"Error saving mask: {str(e)}")
             raise
 
     @staticmethod
@@ -198,9 +200,9 @@ class ModelInference:
             rgba[m > 0, 2] = color[2]
             rgba[m > 0, 3] = color[3]
             Image.fromarray(rgba, mode='RGBA').save(output_path, 'PNG')
-            print(f"Overlay mask saved to {output_path}")
+            logger.info(f"Overlay mask saved to {output_path}")
         except Exception as e:
-            print(f"Error saving overlay mask: {str(e)}")
+            logger.exception(f"Error saving overlay mask: {str(e)}")
             raise
     
     def calculate_water_statistics(self, mask, pixel_size=10):
@@ -236,7 +238,7 @@ class ModelInference:
             }
             
         except Exception as e:
-            print(f"Error calculating water statistics: {str(e)}")
+            logger.exception(f"Error calculating water statistics: {str(e)}")
             return {
                 'water_pixels': 0,
                 'total_pixels': 0,

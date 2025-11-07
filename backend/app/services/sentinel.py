@@ -1,10 +1,13 @@
 import os
 import numpy as np
+import logging
+
 try:
     import rasterio
     from rasterio.transform import from_bounds
     RASTERIO_AVAILABLE = True
-except Exception:
+except Exception as e:
+    logging.error("Failed to import rasterio: %s", e)
     rasterio = None
     from_bounds = None
     RASTERIO_AVAILABLE = False
@@ -52,6 +55,8 @@ def _bounds_from_geojson(geometry_geojson):
     lats = [c[1] for c in coords]
     return (min(lons), min(lats), max(lons), max(lats))
 
+logger = logging.getLogger(__name__)
+
 class SentinelHubService:
     """Service for interacting with Sentinel Hub API"""
 
@@ -65,7 +70,7 @@ class SentinelHubService:
         config.sh_client_secret = os.getenv('SENTINEL_HUB_CLIENT_SECRET', '')
 
         if not config.sh_client_id or not config.sh_client_secret:
-            print("Warning: Sentinel Hub credentials not found. Please set SENTINEL_HUB_CLIENT_ID and SENTINEL_HUB_CLIENT_SECRET environment variables.")
+            logger.warning("Sentinel Hub credentials not found. Set SENTINEL_HUB_CLIENT_ID and SENTINEL_HUB_CLIENT_SECRET.")
 
         return config
 
@@ -325,7 +330,7 @@ class SentinelHubService:
                             optimize=True,
                         )
                     except Exception as je:
-                        print(f"JPEG save failed (continuing without JPG): {je}")
+                        logger.warning(f"JPEG save failed (continuing without JPG): {je}")
                         rgb_jpg_path = None
                 else:
                     rgb_jpg_path = None
@@ -347,5 +352,5 @@ class SentinelHubService:
             }
 
         except Exception as e:
-            print(f"Error downloading Sentinel-2 data: {str(e)}")
+            logger.exception(f"Error downloading Sentinel-2 data: {str(e)}")
             raise

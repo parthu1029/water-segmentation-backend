@@ -8,11 +8,13 @@ from fastapi.responses import FileResponse
 import importlib
 import json
 import hashlib
+import logging
 
 from ....core.config import settings
 from ....db.connection import insert_job, update_job_results, update_job_error, insert_artifact
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Lazy singletons for heavy services
 _sentinel_service = None
@@ -191,7 +193,7 @@ async def predict_waterbody(geojson: Dict[str, Any]):
                     pass
             return resp
 
-        print("Downloading Sentinel-2 data...")
+        logger.info("Downloading Sentinel-2 data...")
 
         try:
             max_px_for_analyze = requested_max_px if (isinstance(requested_max_px, int) and requested_max_px > 0) else 1500
@@ -221,17 +223,17 @@ async def predict_waterbody(geojson: Dict[str, Any]):
         mask = None
         if get_model_inference().model is not None and rgb_tif_path and os.path.exists(rgb_tif_path):
             try:
-                print("Preprocessing image for model...")
+                logger.info("Preprocessing image for model...")
                 processed_image = get_model_inference().preprocess_image(rgb_tif_path)
-                print("Running model inference...")
+                logger.info("Running model inference...")
                 mask = get_model_inference().predict(processed_image)
                 mask = (mask.squeeze() > 0).astype(np.uint8)
             except Exception as e:
-                print(f"Model inference not available, falling back to NDWI: {e}")
+                logger.warning(f"Model inference not available, falling back to NDWI: {e}")
                 mask = None
 
         if mask is None:
-            print("Using NDWI threshold fallback...")
+            logger.info("Using NDWI threshold fallback...")
             # Read NDWI and threshold (e.g., > 0.2)
             ndwi = None
             if ndwi_tif_path and os.path.exists(ndwi_tif_path):
@@ -358,6 +360,7 @@ async def predict_waterbody(geojson: Dict[str, Any]):
                 update_job_error(locals().get('request_id', 'unknown'), str(e))
             except Exception:
                 pass
+        logger.exception("Unhandled error in predict_waterbody")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error processing request: {str(e)}"

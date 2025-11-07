@@ -5,6 +5,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import Response
+import logging
+import uuid
+import contextvars
+import time
 
 # Ensure the project root (parent of this file's directory) is on sys.path
 _CURRENT_DIR = Path(__file__).resolve().parent
@@ -14,6 +18,59 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from app.core.config import settings
 from app.api.api_v1.api import api_router
+
+request_id_var = contextvars.ContextVar("request_id", default=None)
+
+class RequestIdFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        rid = request_id_var.get()
+        setattr(record, "request_id", rid)
+        return True
+
+class DBLogHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            from app.db.connection import insert_log
+            message = self.format(record)
+            rid = getattr(record, "request_id", None)
+            extra = {
+                "processName": record.processName if hasattr(record, "processName") else None,
+                "threadName": record.threadName if hasattr(record, "threadName") else None,
+                "module": record.module,
+            }
+            insert_log(
+                level=record.levelname,
+                name=record.name,
+                message=message,
+                pathname=record.pathname,
+                lineno=record.lineno,
+                funcname=record.funcName,
+                request_id=rid,
+                extra=extra,
+            )
+        except Exception:
+            pass
+
+def configure_logging():
+    level = logging.DEBUG if settings.DEBUG else logging.INFO
+    logger = logging.getLogger()
+    logger.setLevel(level)
+    for h in list(logger.handlers):
+        logger.removeHandler(h)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] [%(request_id)s] %(message)s")
+    stream = logging.StreamHandler()
+    stream.setLevel(level)
+    stream.addFilter(RequestIdFilter())
+    stream.setFormatter(fmt)
+    dbh = DBLogHandler()
+    dbh.setLevel(level)
+    dbh.addFilter(RequestIdFilter())
+    dbh.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(stream)
+    logger.addHandler(dbh)
+
+configure_logging()
+logger = logging.getLogger(__name__)
 
 # Create necessary directories
 #os.makedirs(settings.INPUT_DIR, exist_ok=True)
@@ -28,6 +85,23 @@ app = FastAPI(
     docs_url="/api/docs",
     redoc_url="/api/redoc",
 )
+
+@app.middleware("http")
+async def add_request_id(request, call_next):
+    rid = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    token = request_id_var.set(rid)
+    try:
+        start = time.perf_counter()
+        response = await call_next(request)
+        duration_ms = (time.perf_counter() - start) * 1000.0
+        try:
+            logger.info(f"{request.method} {request.url.path} -> {response.status_code} in {duration_ms:.1f}ms")
+        except Exception:
+            pass
+    finally:
+        request_id_var.reset(token)
+    response.headers["X-Request-ID"] = rid
+    return response
 
 allowed_origins = [str(origin) for origin in settings.BACKEND_CORS_ORIGINS]
 
@@ -65,7 +139,7 @@ else:
     try:
         os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
     except Exception as e:
-        print(f"OUTPUT_DIR create warning: {e}")
+        logger.warning(f"OUTPUT_DIR create warning: {e}")
     app.mount("/static", StaticFiles(directory=settings.OUTPUT_DIR, check_dir=False), name="static")
 
 @app.get("/")
@@ -80,7 +154,7 @@ def on_startup():
       init_db()
     except Exception as e:
       # In debug, it's useful to see this in logs, but avoid crashing startup
-      print(f"DB init error: {e}")
+      logger.warning(f"DB init error: {e}")
         
 '''
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
 from pathlib import Path
 import os
+import logging
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -63,4 +64,4 @@ try:
     os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
 except Exception as e:
     # Avoid crashing on serverless read-only FS; main will try again for /tmp paths
-    print(f"DATA_DIR create warning: {e}")
+    logging.getLogger(__name__).warning(f"DATA_DIR create warning: {e}")

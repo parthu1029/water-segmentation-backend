@@ -54,6 +54,19 @@ def init_db():
         created_at TIMESTAMPTZ DEFAULT NOW(),
         PRIMARY KEY (request_id, filename)
     );
+
+    CREATE TABLE IF NOT EXISTS logs (
+        id BIGSERIAL PRIMARY KEY,
+        ts TIMESTAMPTZ DEFAULT NOW(),
+        level TEXT,
+        name TEXT,
+        message TEXT,
+        pathname TEXT,
+        lineno INT,
+        funcname TEXT,
+        request_id TEXT,
+        extra JSONB
+    );
     """
     conn = None
     try:
@@ -166,6 +179,31 @@ def get_artifact(request_id: str, filename: str) -> Optional[Tuple[bytes, Option
                 if not row:
                     return None
                 return row[0].tobytes() if hasattr(row[0], 'tobytes') else row[0], row[1]
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def insert_log(level: str, name: str, message: str, pathname: str, lineno: int, funcname: str, request_id: Optional[str] = None, extra: Optional[Dict[str, Any]] = None):
+    sql = """
+    INSERT INTO logs (level, name, message, pathname, lineno, funcname, request_id, extra)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    """
+    conn = None
+    try:
+        conn = get_connection()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (
+                    level,
+                    name,
+                    message,
+                    pathname,
+                    int(lineno),
+                    funcname,
+                    request_id,
+                    extras.Json(extra or {})
+                ))
     finally:
         if conn is not None:
             conn.close()
