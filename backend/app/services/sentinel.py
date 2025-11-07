@@ -1,8 +1,14 @@
 import os
 import io
 import numpy as np
-import rasterio
-from rasterio.transform import from_bounds
+try:
+    import rasterio
+    from rasterio.transform import from_bounds
+    RASTERIO_AVAILABLE = True
+except Exception:
+    rasterio = None
+    from_bounds = None
+    RASTERIO_AVAILABLE = False
 try:
     from sentinelhub import (
         CRS,
@@ -18,7 +24,12 @@ try:
 except Exception:
     CRS = BBox = DataCollection = MimeType = MosaickingOrder = SentinelHubRequest = bbox_to_dimensions = SHConfig = None
     SH_AVAILABLE = False
-from shapely.geometry import shape as shp_shape
+try:
+    from shapely.geometry import shape as shp_shape
+    SHAPELY_AVAILABLE = True
+except Exception:
+    shp_shape = None
+    SHAPELY_AVAILABLE = False
 from datetime import datetime, timedelta
 from PIL import Image
 import urllib.request as urlrequest
@@ -91,9 +102,25 @@ class SentinelHubService:
         Returns:
             dict containing paths and bounds for overlay
         """
-        # Convert geojson to shapely geometry
-        geom = shp_shape(geometry_geojson)
-        minx, miny, maxx, maxy = geom.bounds
+        # Compute bounds from GeoJSON
+        if SHAPELY_AVAILABLE and shp_shape is not None:
+            geom = shp_shape(geometry_geojson)
+            minx, miny, maxx, maxy = geom.bounds
+        else:
+            def _bounds_from_geojson(gj):
+                def _flatten(coords):
+                    for c in coords:
+                        if isinstance(c[0], (float, int)) and isinstance(c[1], (float, int)):
+                            yield c
+                        else:
+                            yield from _flatten(c)
+                coords = list(_flatten(gj.get('coordinates', [])))
+                if not coords:
+                    raise ValueError('Invalid geometry: no coordinates')
+                lons = [c[0] for c in coords]
+                lats = [c[1] for c in coords]
+                return (min(lons), min(lats), max(lons), max(lats))
+            minx, miny, maxx, maxy = _bounds_from_geojson(geometry_geojson)
 
         # BBox for SH will be created inside build_request if SH is available
 
@@ -153,6 +180,7 @@ class SentinelHubService:
                 except Exception:
                     max_cc_fraction = None
             bbox_sh = BBox(bbox=(minx, miny, maxx, maxy), crs=CRS.WGS84)
+            fmt_default = MimeType.TIFF if RASTERIO_AVAILABLE else MimeType.PNG
             return SentinelHubRequest(
                 evalscript=evalscript,
                 input_data=[
@@ -168,7 +196,7 @@ class SentinelHubService:
                     )
                 ],
                 responses=[
-                    SentinelHubRequest.output_response('default', MimeType.TIFF),
+                    SentinelHubRequest.output_response('default', fmt_default),
                     SentinelHubRequest.output_response('ndwi', MimeType.TIFF)
                 ],
                 bbox=bbox_sh,
@@ -178,7 +206,7 @@ class SentinelHubService:
 
         acquisition_date = None
         data = None
-        sh_ready = bool(SH_AVAILABLE and self.config and os.getenv('SENTINEL_HUB_CLIENT_ID') and os.getenv('SENTINEL_HUB_CLIENT_SECRET'))
+        sh_ready = bool(SH_AVAILABLE and self.config and os.getenv('SENTINEL_HUB_CLIENT_ID') and os.getenv('SENTINEL_HUB_CLIENT_SECRET') and RASTERIO_AVAILABLE)
 
         if date_iso and sh_ready:
             # Preferred end date is the provided date
@@ -353,59 +381,67 @@ class SentinelHubService:
         try:
             os.makedirs(output_dir, exist_ok=True)
 
-            # Decode TIFF bytes to arrays if needed
+            # Prepare arrays from responses
+            # default output may be PNG bytes (when rasterio is unavailable) or float arrays
             if isinstance(data[0], (bytes, bytearray)):
-                def _decode_tiff(b):
-                    with rasterio.io.MemoryFile(b) as mem:
-                        with mem.open() as ds:
-                            arr = ds.read()  # (bands, H, W)
-                            return np.moveaxis(arr, 0, -1)  # (H, W, bands)
-                rgb_data = _decode_tiff(data[0])
-                ndwi_data = _decode_tiff(data[1])
+                img_rgba = Image.open(io.BytesIO(data[0])).convert('RGBA')
+                rgba_arr = np.array(img_rgba)
+                rgb_uint8 = rgba_arr[:, :, :3]
+                alpha_uint8 = rgba_arr[:, :, 3]
             else:
-                rgb_data = data[0]  # H x W x 4 (R,G,B,mask) floats 0-1
-                ndwi_data = data[1]  # H x W x 1 float NDWI
+                # Expect floats 0..1
+                rgb_float = data[0]
+                rgb_uint8 = np.clip(rgb_float[:, :, :3] * 255.0, 0, 255).astype(np.uint8)
+                alpha_uint8 = np.clip(rgb_float[:, :, 3] * 255.0, 0, 255).astype(np.uint8)
 
-            # Write GeoTIFFs with georeferencing
-            transform = from_bounds(minx, miny, maxx, maxy, width=rgb_data.shape[1], height=rgb_data.shape[0])
+            # NDWI is kept as TIFF response to retain floats; expect array
+            if isinstance(data[1], (bytes, bytearray)) and RASTERIO_AVAILABLE:
+                with rasterio.io.MemoryFile(data[1]) as mem:
+                    with mem.open() as ds:
+                        ndwi_arr = ds.read(1)
+            else:
+                ndwi_src = data[1]
+                ndwi_arr = ndwi_src[:, :, 0] if ndwi_src.ndim == 3 else ndwi_src
 
-            rgb_tif_path = os.path.join(output_dir, 'sentinel_rgb.tif')
-            with rasterio.open(
-                rgb_tif_path,
-                'w',
-                driver='GTiff',
-                height=rgb_data.shape[0],
-                width=rgb_data.shape[1],
-                count=4,
-                dtype='float32',
-                crs='EPSG:4326',
-                transform=transform,
-            ) as dst:
-                # R,G,B
-                dst.write(rgb_data[:, :, 0], 1)
-                dst.write(rgb_data[:, :, 1], 2)
-                dst.write(rgb_data[:, :, 2], 3)
-                # Alpha as 0..1, store as float32 as well
-                dst.write(rgb_data[:, :, 3], 4)
+            # Write GeoTIFFs only if rasterio is available
+            rgb_tif_path = None
+            ndwi_tif_path = None
+            if RASTERIO_AVAILABLE and from_bounds is not None:
+                transform = from_bounds(minx, miny, maxx, maxy, width=rgb_uint8.shape[1], height=rgb_uint8.shape[0])
+                # Save RGB as float32 0..1 with alpha
+                rgb_tif_path = os.path.join(output_dir, 'sentinel_rgb.tif')
+                with rasterio.open(
+                    rgb_tif_path,
+                    'w',
+                    driver='GTiff',
+                    height=rgb_uint8.shape[0],
+                    width=rgb_uint8.shape[1],
+                    count=4,
+                    dtype='float32',
+                    crs='EPSG:4326',
+                    transform=transform,
+                ) as dst:
+                    dst.write((rgb_uint8[:, :, 0] / 255.0).astype('float32'), 1)
+                    dst.write((rgb_uint8[:, :, 1] / 255.0).astype('float32'), 2)
+                    dst.write((rgb_uint8[:, :, 2] / 255.0).astype('float32'), 3)
+                    dst.write((alpha_uint8 / 255.0).astype('float32'), 4)
 
-            ndwi_tif_path = os.path.join(output_dir, 'ndwi.tif')
-            with rasterio.open(
-                ndwi_tif_path,
-                'w',
-                driver='GTiff',
-                height=ndwi_data.shape[0],
-                width=ndwi_data.shape[1],
-                count=1,
-                dtype='float32',
-                crs='EPSG:4326',
-                transform=transform,
-            ) as dst:
-                dst.write(ndwi_data[:, :, 0], 1)
+                ndwi_tif_path = os.path.join(output_dir, 'ndwi.tif')
+                with rasterio.open(
+                    ndwi_tif_path,
+                    'w',
+                    driver='GTiff',
+                    height=ndwi_arr.shape[0],
+                    width=ndwi_arr.shape[1],
+                    count=1,
+                    dtype='float32',
+                    crs='EPSG:4326',
+                    transform=transform,
+                ) as dst:
+                    dst.write(ndwi_arr.astype('float32'), 1)
 
-            # Save a PNG quicklook for overlay (scale 0-255, apply alpha)
+            # Always save quicklook PNG and JPG
             rgb_png_path = os.path.join(output_dir, 'sentinel_rgb.png')
-            rgb_uint8 = np.clip(rgb_data[:, :, :3] * 255.0, 0, 255).astype(np.uint8)
-            alpha_uint8 = np.clip(rgb_data[:, :, 3] * 255.0, 0, 255).astype(np.uint8)
             rgba = np.dstack([rgb_uint8, alpha_uint8])
             Image.fromarray(rgba, mode='RGBA').save(rgb_png_path)
 
@@ -417,13 +453,34 @@ class SentinelHubService:
             except Exception:
                 rgb_jpg_path = None
 
+            # Build overlay from NDWI threshold
+            overlay_png_path = None
+            try:
+                mask = ndwi_arr > 0.2
+                overlay_rgba = np.zeros((mask.shape[0], mask.shape[1], 4), dtype=np.uint8)
+                overlay_rgba[mask] = np.array([0, 150, 255, 255], dtype=np.uint8)
+                overlay_png_path = os.path.join(output_dir, 'water_mask.png')
+                Image.fromarray(overlay_rgba, mode='RGBA').save(overlay_png_path)
+            except Exception:
+                overlay_png_path = None
+
             bounds = [[miny, minx], [maxy, maxx]]  # for Leaflet imageOverlay
+
+            ndwi_npy_path = None
+            if ndwi_tif_path is None:
+                try:
+                    ndwi_npy_path = os.path.join(output_dir, 'ndwi.npy')
+                    np.save(ndwi_npy_path, ndwi_arr)
+                except Exception:
+                    ndwi_npy_path = None
 
             return {
                 'rgb_tif_path': rgb_tif_path,
                 'ndwi_tif_path': ndwi_tif_path,
+                'ndwi_npy_path': ndwi_npy_path,
                 'rgb_png_path': rgb_png_path,
                 'rgb_jpg_path': rgb_jpg_path,
+                'overlay_png_path': overlay_png_path,
                 'bounds': bounds,
                 'acquisition_date': acquisition_date,
             }
