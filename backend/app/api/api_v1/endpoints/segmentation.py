@@ -10,6 +10,7 @@ import json
 import hashlib
 
 from ....core.config import settings
+from ....db.connection import insert_job, update_job_results, update_job_error, insert_artifact
 
 router = APIRouter()
 
@@ -96,6 +97,22 @@ async def predict_waterbody(geojson: Dict[str, Any]):
         output_dir = os.path.join(settings.OUTPUT_DIR, request_id)
         os.makedirs(output_dir, exist_ok=True)
 
+        # Log job payload when DB storage is enabled
+        if settings.STORE_IN_DB:
+            try:
+                insert_job(request_id, payload={
+                    'geometry': geometry,
+                    'date': requested_date,
+                    'max_cloud': requested_max_cloud,
+                    'max_px': requested_max_px,
+                    'res': 10,
+                    'jpg_only': jpg_only,
+                    'fast_jpg': fast_jpg,
+                })
+            except Exception as _je:
+                # Don't fail request if logging fails
+                pass
+
         if jpg_only:
             rgb_png_path = os.path.join(output_dir, 'sentinel_rgb.png')
             rgb_jpg_path = os.path.join(output_dir, 'sentinel_rgb.jpg')
@@ -126,11 +143,35 @@ async def predict_waterbody(geojson: Dict[str, Any]):
                             bounds = [[b.bottom, b.left], [b.top, b.right]]
                 except Exception:
                     bounds = None
-            rgb_url = f"/static/{request_id}/sentinel_rgb.png" if rgb_png_path and os.path.exists(rgb_png_path) else None
-            rgb_jpg_url = f"/static/{request_id}/sentinel_rgb.jpg" if rgb_jpg_path and os.path.exists(rgb_jpg_path) else None
-            rgb_tif_url = f"/static/{request_id}/sentinel_rgb.tif" if rgb_tif_path and os.path.exists(rgb_tif_path) else None
-            ndwi_tif_url = f"/static/{request_id}/ndwi.tif" if ndwi_tif_path and os.path.exists(ndwi_tif_path) else None
-            return {
+            # Optionally store artifacts in DB
+            if settings.STORE_IN_DB:
+                try:
+                    if rgb_png_path and os.path.exists(rgb_png_path):
+                        with open(rgb_png_path, 'rb') as f:
+                            insert_artifact(request_id, 'sentinel_rgb.png', f.read(), 'image/png')
+                    if rgb_jpg_path and os.path.exists(rgb_jpg_path):
+                        with open(rgb_jpg_path, 'rb') as f:
+                            insert_artifact(request_id, 'sentinel_rgb.jpg', f.read(), 'image/jpeg')
+                    if rgb_tif_path and os.path.exists(rgb_tif_path):
+                        with open(rgb_tif_path, 'rb') as f:
+                            insert_artifact(request_id, 'sentinel_rgb.tif', f.read(), 'image/tiff')
+                    if ndwi_tif_path and os.path.exists(ndwi_tif_path):
+                        with open(ndwi_tif_path, 'rb') as f:
+                            insert_artifact(request_id, 'ndwi.tif', f.read(), 'image/tiff')
+                    # Optionally remove local files to avoid persisting to disk when storing in DB
+                    for p in [rgb_png_path, rgb_jpg_path, rgb_tif_path, ndwi_tif_path]:
+                        try:
+                            if p and os.path.exists(p):
+                                os.remove(p)
+                        except Exception:
+                            pass
+                except Exception as _ae:
+                    pass
+            rgb_url = f"/static/{request_id}/sentinel_rgb.png" if rgb_png_path and os.path.exists(rgb_png_path) or settings.STORE_IN_DB else None
+            rgb_jpg_url = f"/static/{request_id}/sentinel_rgb.jpg" if rgb_jpg_path and os.path.exists(rgb_jpg_path) or (settings.STORE_IN_DB and rgb_jpg_path) else None
+            rgb_tif_url = f"/static/{request_id}/sentinel_rgb.tif" if rgb_tif_path and os.path.exists(rgb_tif_path) or settings.STORE_IN_DB else None
+            ndwi_tif_url = f"/static/{request_id}/ndwi.tif" if ndwi_tif_path and os.path.exists(ndwi_tif_path) or settings.STORE_IN_DB else None
+            resp = {
                 'status': 'success',
                 'request_id': request_id,
                 'timestamp': datetime.utcnow().isoformat(),
@@ -143,6 +184,12 @@ async def predict_waterbody(geojson: Dict[str, Any]):
                     'acquisition_date': acquisition_date,
                 }
             }
+            if settings.STORE_IN_DB:
+                try:
+                    update_job_results(request_id, resp.get('results', {}))
+                except Exception:
+                    pass
+            return resp
 
         print("Downloading Sentinel-2 data...")
 
@@ -238,14 +285,42 @@ async def predict_waterbody(geojson: Dict[str, Any]):
 
         water_percentage = (water_area_km2 / total_area_km2) * 100 if total_area_km2 > 0 else 0.0
 
-        # 5. Build URLs for frontend
-        rgb_url = f"/static/{request_id}/sentinel_rgb.png" if rgb_png_path and os.path.exists(rgb_png_path) else None
-        rgb_jpg_url = f"/static/{request_id}/sentinel_rgb.jpg" if rgb_jpg_path and os.path.exists(rgb_jpg_path) else None
-        mask_url = f"/static/{request_id}/water_mask.png" if overlay_saved and os.path.exists(mask_overlay_path) else None
-        rgb_tif_url = f"/static/{request_id}/sentinel_rgb.tif" if rgb_tif_path and os.path.exists(rgb_tif_path) else None
-        ndwi_tif_url = f"/static/{request_id}/ndwi.tif" if ndwi_tif_path and os.path.exists(ndwi_tif_path) else None
+        # Optionally store artifacts in DB
+        if settings.STORE_IN_DB:
+            try:
+                if rgb_png_path and os.path.exists(rgb_png_path):
+                    with open(rgb_png_path, 'rb') as f:
+                        insert_artifact(request_id, 'sentinel_rgb.png', f.read(), 'image/png')
+                if rgb_jpg_path and os.path.exists(rgb_jpg_path):
+                    with open(rgb_jpg_path, 'rb') as f:
+                        insert_artifact(request_id, 'sentinel_rgb.jpg', f.read(), 'image/jpeg')
+                if overlay_saved and os.path.exists(mask_overlay_path):
+                    with open(mask_overlay_path, 'rb') as f:
+                        insert_artifact(request_id, 'water_mask.png', f.read(), 'image/png')
+                if rgb_tif_path and os.path.exists(rgb_tif_path):
+                    with open(rgb_tif_path, 'rb') as f:
+                        insert_artifact(request_id, 'sentinel_rgb.tif', f.read(), 'image/tiff')
+                if ndwi_tif_path and os.path.exists(ndwi_tif_path):
+                    with open(ndwi_tif_path, 'rb') as f:
+                        insert_artifact(request_id, 'ndwi.tif', f.read(), 'image/tiff')
+                # Optionally remove local files to avoid persisting to disk when storing in DB
+                for p in [rgb_png_path, rgb_jpg_path, mask_overlay_path, rgb_tif_path, ndwi_tif_path]:
+                    try:
+                        if p and os.path.exists(p):
+                            os.remove(p)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
-        return {
+        # 5. Build URLs for frontend
+        rgb_url = f"/static/{request_id}/sentinel_rgb.png" if rgb_png_path and os.path.exists(rgb_png_path) or settings.STORE_IN_DB else None
+        rgb_jpg_url = f"/static/{request_id}/sentinel_rgb.jpg" if rgb_jpg_path and os.path.exists(rgb_jpg_path) or (settings.STORE_IN_DB and rgb_jpg_path) else None
+        mask_url = f"/static/{request_id}/water_mask.png" if overlay_saved and os.path.exists(mask_overlay_path) or (settings.STORE_IN_DB and overlay_saved) else None
+        rgb_tif_url = f"/static/{request_id}/sentinel_rgb.tif" if rgb_tif_path and os.path.exists(rgb_tif_path) or settings.STORE_IN_DB else None
+        ndwi_tif_url = f"/static/{request_id}/ndwi.tif" if ndwi_tif_path and os.path.exists(ndwi_tif_path) or settings.STORE_IN_DB else None
+
+        resp = {
             'status': 'success',
             'request_id': request_id,
             'timestamp': datetime.utcnow().isoformat(),
@@ -262,11 +337,27 @@ async def predict_waterbody(geojson: Dict[str, Any]):
                 'acquisition_date': acquisition_date,
             }
         }
+        if settings.STORE_IN_DB:
+            try:
+                update_job_results(request_id, resp.get('results', {}))
+            except Exception:
+                pass
+        return resp
         
     except HTTPException as he:
         # Pass through HTTP errors like 404 for no imagery
+        if settings.STORE_IN_DB:
+            try:
+                update_job_error(locals().get('request_id', 'unknown'), str(he.detail))
+            except Exception:
+                pass
         raise he
     except Exception as e:
+        if settings.STORE_IN_DB:
+            try:
+                update_job_error(locals().get('request_id', 'unknown'), str(e))
+            except Exception:
+                pass
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error processing request: {str(e)}"
@@ -277,11 +368,24 @@ async def get_result(request_id: str):
     """
     Get the result of a previous prediction by request ID.
     """
-    mask_path = os.path.join(settings.OUTPUT_DIR, request_id, 'water_mask.png')
-    if not os.path.exists(mask_path):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Request ID not found or results not available"
-        )
-    
-    return FileResponse(mask_path, media_type="image/png")
+    if settings.STORE_IN_DB:
+        try:
+            from ....db.connection import get_artifact
+            row = get_artifact(request_id, 'water_mask.png')
+            if not row:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Results not available")
+            content, content_type = row
+            from fastapi.responses import Response
+            return Response(content, media_type=content_type or "image/png")
+        except HTTPException:
+            raise
+        except Exception as _e:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(_e))
+    else:
+        mask_path = os.path.join(settings.OUTPUT_DIR, request_id, 'water_mask.png')
+        if not os.path.exists(mask_path):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Request ID not found or results not available"
+            )
+        return FileResponse(mask_path, media_type="image/png")

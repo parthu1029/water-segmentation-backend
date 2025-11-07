@@ -48,6 +48,7 @@ class Settings(BaseSettings):
 
     # API Configuration
     DEBUG: bool = os.getenv("DEBUG", "False").lower() in ("true", "1", "t")
+    STORE_IN_DB: bool = os.getenv("STORE_IN_DB", "False").lower() in ("true", "1", "t", "yes", "y")
 
     # Database
     DATABASE_URL: str = os.getenv("DATABASE_URL", "")

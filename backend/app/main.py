@@ -1,9 +1,10 @@
 import os
 import sys
 from pathlib import Path
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import Response
 
 # Ensure the project root (parent of this file's directory) is on sys.path
 _CURRENT_DIR = Path(__file__).resolve().parent
@@ -44,12 +45,28 @@ if settings.BACKEND_CORS_ORIGINS:
 # Include API router
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
-# Mount static files from configured output directory
-try:
-    os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
-except Exception as e:
-    print(f"OUTPUT_DIR create warning: {e}")
-app.mount("/static", StaticFiles(directory=settings.OUTPUT_DIR, check_dir=False), name="static")
+# Serve static artifacts
+if settings.STORE_IN_DB:
+    @app.get("/static/{request_id}/{filename:path}")
+    async def static_from_db(request_id: str, filename: str):
+        try:
+            from app.db.connection import get_artifact
+            row = get_artifact(request_id, filename)
+            if not row:
+                raise HTTPException(status_code=404, detail="Artifact not found")
+            content, content_type = row
+            return Response(content, media_type=content_type or "application/octet-stream")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+else:
+    # Mount static files from configured output directory
+    try:
+        os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
+    except Exception as e:
+        print(f"OUTPUT_DIR create warning: {e}")
+    app.mount("/static", StaticFiles(directory=settings.OUTPUT_DIR, check_dir=False), name="static")
 
 @app.get("/")
 async def root():

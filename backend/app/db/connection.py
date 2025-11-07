@@ -1,7 +1,7 @@
 import os
 import psycopg2
 import psycopg2.extras as extras
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 from ..core.config import settings
 
@@ -37,6 +37,23 @@ def init_db():
         properties JSONB,
         created_at TIMESTAMPTZ DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS jobs (
+        request_id TEXT PRIMARY KEY,
+        payload JSONB,
+        results JSONB,
+        error TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS artifacts (
+        request_id TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        content BYTEA NOT NULL,
+        content_type TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (request_id, filename)
+    );
     """
     conn = None
     try:
@@ -61,6 +78,94 @@ def insert_roi(roi_id: str, geometry: Dict[str, Any], properties: Optional[Dict[
         with conn:
             with conn.cursor() as cur:
                 cur.execute(sql, (roi_id, extras.Json(geometry), extras.Json(properties or {})))
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def insert_job(request_id: str, payload: Dict[str, Any], results: Optional[Dict[str, Any]] = None, error: Optional[str] = None):
+    sql = """
+    INSERT INTO jobs (request_id, payload, results, error)
+    VALUES (%s, %s, %s, %s)
+    ON CONFLICT (request_id) DO UPDATE SET
+        payload = EXCLUDED.payload,
+        results = EXCLUDED.results,
+        error = EXCLUDED.error
+    """
+    conn = None
+    try:
+        conn = get_connection()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (request_id, extras.Json(payload or {}), extras.Json(results or {}), error))
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def update_job_results(request_id: str, results: Dict[str, Any]):
+    sql = """
+    UPDATE jobs SET results = %s, error = NULL WHERE request_id = %s
+    """
+    conn = None
+    try:
+        conn = get_connection()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (extras.Json(results or {}), request_id))
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def update_job_error(request_id: str, error: str):
+    sql = """
+    UPDATE jobs SET error = %s WHERE request_id = %s
+    """
+    conn = None
+    try:
+        conn = get_connection()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (error, request_id))
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def insert_artifact(request_id: str, filename: str, content: bytes, content_type: Optional[str] = None):
+    sql = """
+    INSERT INTO artifacts (request_id, filename, content, content_type)
+    VALUES (%s, %s, %s, %s)
+    ON CONFLICT (request_id, filename) DO UPDATE SET
+        content = EXCLUDED.content,
+        content_type = EXCLUDED.content_type
+    """
+    conn = None
+    try:
+        conn = get_connection()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (request_id, filename, psycopg2.Binary(content), content_type))
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def get_artifact(request_id: str, filename: str) -> Optional[Tuple[bytes, Optional[str]]]:
+    sql = """
+    SELECT content, content_type FROM artifacts WHERE request_id = %s AND filename = %s
+    """
+    conn = None
+    try:
+        conn = get_connection()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (request_id, filename))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return row[0].tobytes() if hasattr(row[0], 'tobytes') else row[0], row[1]
     finally:
         if conn is not None:
             conn.close()
