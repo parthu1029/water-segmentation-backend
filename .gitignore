@@ -65,3 +65,5 @@ logs/
 
 instance/
 db.sqlite3
+
+local_backend

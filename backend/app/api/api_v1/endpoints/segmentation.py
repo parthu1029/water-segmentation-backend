@@ -6,6 +6,8 @@ from typing import Dict, Any
 import numpy as np
 from fastapi.responses import FileResponse
 import importlib
+import json
+import hashlib
 
 from ....core.config import settings
 
@@ -41,13 +43,6 @@ async def predict_waterbody(geojson: Dict[str, Any]):
         Dictionary containing paths to the results
     """
     try:
-        # Generate a unique ID for this request
-        request_id = str(uuid.uuid4())
-        
-        # Create output directory for this request
-        output_dir = os.path.join(settings.OUTPUT_DIR, request_id)
-        os.makedirs(output_dir, exist_ok=True)
-        
         # Parse GeoJSON and get coordinates
         geometry = geojson.get('geometry') if isinstance(geojson, dict) and 'geometry' in geojson else geojson
         if not geometry or geometry.get('type') not in ('Polygon', 'MultiPolygon'):
@@ -55,10 +50,19 @@ async def predict_waterbody(geojson: Dict[str, Any]):
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="GeoJSON must contain a Polygon or MultiPolygon geometry"
             )
-        # 1. Download Sentinel-2 data
-        print("Downloading Sentinel-2 data...")
+        jpg_only = False
+        try:
+            jpg_only = bool(geojson.get('jpg_only')) if isinstance(geojson, dict) else False
+        except Exception:
+            jpg_only = False
+        fast_jpg = False
+        try:
+            fast_jpg = bool(geojson.get('fast_jpg')) if isinstance(geojson, dict) else False
+        except Exception:
+            fast_jpg = False
         requested_date = None
         requested_max_cloud = None
+        requested_max_px = None
         if isinstance(geojson, dict):
             requested_date = geojson.get('date')
             requested_max_cloud = geojson.get('max_cloud')
@@ -66,13 +70,90 @@ async def predict_waterbody(geojson: Dict[str, Any]):
                 requested_max_cloud = int(requested_max_cloud) if requested_max_cloud is not None else None
             except Exception:
                 requested_max_cloud = None
+            try:
+                requested_max_px = geojson.get('max_px')
+                requested_max_px = int(requested_max_px) if requested_max_px is not None else None
+            except Exception:
+                requested_max_px = None
+        if jpg_only and fast_jpg and (requested_max_px is None or requested_max_px <= 0):
+            requested_max_px = 1500
+
+        cache_id = None
+        try:
+            payload = {
+                'geometry': geometry,
+                'date': requested_date or '',
+                'max_cloud': requested_max_cloud if requested_max_cloud is not None else '',
+                'res': 10,
+                'max_px': requested_max_px if requested_max_px is not None else '',
+            }
+            m = hashlib.sha1(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
+            cache_id = m.hexdigest()[:24]
+        except Exception:
+            cache_id = str(uuid.uuid4())
+
+        request_id = cache_id if jpg_only else str(uuid.uuid4())
+        output_dir = os.path.join(settings.OUTPUT_DIR, request_id)
+        os.makedirs(output_dir, exist_ok=True)
+
+        if jpg_only:
+            rgb_png_path = os.path.join(output_dir, 'sentinel_rgb.png')
+            rgb_jpg_path = os.path.join(output_dir, 'sentinel_rgb.jpg')
+            rgb_tif_path = os.path.join(output_dir, 'sentinel_rgb.tif')
+            ndwi_tif_path = os.path.join(output_dir, 'ndwi.tif')
+            bounds = None
+            acquisition_date = None
+            if not (os.path.exists(rgb_jpg_path) or os.path.exists(rgb_png_path)):
+                dl = await get_sentinel_service().download_sentinel_data(
+                    geometry_geojson=geometry,
+                    output_dir=output_dir,
+                    date_iso=requested_date,
+                    max_cloud=requested_max_cloud,
+                    max_px=requested_max_px
+                )
+                rgb_png_path = dl.get('rgb_png_path')
+                rgb_jpg_path = dl.get('rgb_jpg_path')
+                rgb_tif_path = dl.get('rgb_tif_path')
+                ndwi_tif_path = dl.get('ndwi_tif_path')
+                bounds = dl.get('bounds')
+                acquisition_date = dl.get('acquisition_date')
+            else:
+                try:
+                    rasterio = importlib.import_module("rasterio")
+                    if os.path.exists(rgb_tif_path):
+                        with rasterio.open(rgb_tif_path) as src:
+                            b = src.bounds
+                            bounds = [[b.bottom, b.left], [b.top, b.right]]
+                except Exception:
+                    bounds = None
+            rgb_url = f"/static/{request_id}/sentinel_rgb.png" if rgb_png_path and os.path.exists(rgb_png_path) else None
+            rgb_jpg_url = f"/static/{request_id}/sentinel_rgb.jpg" if rgb_jpg_path and os.path.exists(rgb_jpg_path) else None
+            rgb_tif_url = f"/static/{request_id}/sentinel_rgb.tif" if rgb_tif_path and os.path.exists(rgb_tif_path) else None
+            ndwi_tif_url = f"/static/{request_id}/ndwi.tif" if ndwi_tif_path and os.path.exists(ndwi_tif_path) else None
+            return {
+                'status': 'success',
+                'request_id': request_id,
+                'timestamp': datetime.utcnow().isoformat(),
+                'results': {
+                    'rgb_url': rgb_url,
+                    'rgb_jpg_url': rgb_jpg_url,
+                    'rgb_tif_url': rgb_tif_url,
+                    'ndwi_tif_url': ndwi_tif_url,
+                    'bounds': bounds,
+                    'acquisition_date': acquisition_date,
+                }
+            }
+
+        print("Downloading Sentinel-2 data...")
 
         try:
+            max_px_for_analyze = requested_max_px if (isinstance(requested_max_px, int) and requested_max_px > 0) else 1500
             dl = await get_sentinel_service().download_sentinel_data(
                 geometry_geojson=geometry,
                 output_dir=output_dir,
                 date_iso=requested_date,
-                max_cloud=requested_max_cloud
+                max_cloud=requested_max_cloud,
+                max_px=max_px_for_analyze
             )
         except ValueError as ve:
             raise HTTPException(
@@ -83,7 +164,8 @@ async def predict_waterbody(geojson: Dict[str, Any]):
         rgb_tif_path = dl.get('rgb_tif_path')
         ndwi_tif_path = dl.get('ndwi_tif_path')
         ndwi_npy_path = dl.get('ndwi_npy_path')
-        rgb_png_path = dl['rgb_png_path']
+        rgb_png_path = dl.get('rgb_png_path')
+        rgb_jpg_path = dl.get('rgb_jpg_path')
         bounds = dl['bounds']
         acquisition_date = dl.get('acquisition_date')
         resolution = 10  # meters, keep in sync with sentinel service
@@ -121,7 +203,12 @@ async def predict_waterbody(geojson: Dict[str, Any]):
 
         # 3. Save mask overlay PNG (transparent background)
         mask_overlay_path = os.path.join(output_dir, 'water_mask.png')
-        get_model_inference().save_mask_as_overlay_png(mask, mask_overlay_path, color=(0, 150, 255, 255))
+        overlay_saved = False
+        try:
+            get_model_inference().save_mask_as_overlay_png(mask, mask_overlay_path, color=(0, 150, 255, 255))
+            overlay_saved = True
+        except Exception as _e:
+            overlay_saved = False
 
         # 4. Compute statistics
         # Water area from mask pixel count and pixel size
@@ -152,9 +239,9 @@ async def predict_waterbody(geojson: Dict[str, Any]):
         water_percentage = (water_area_km2 / total_area_km2) * 100 if total_area_km2 > 0 else 0.0
 
         # 5. Build URLs for frontend
-        rgb_url = f"/static/{request_id}/sentinel_rgb.png"
-        rgb_jpg_url = f"/static/{request_id}/sentinel_rgb.jpg"
-        mask_url = f"/static/{request_id}/water_mask.png"
+        rgb_url = f"/static/{request_id}/sentinel_rgb.png" if rgb_png_path and os.path.exists(rgb_png_path) else None
+        rgb_jpg_url = f"/static/{request_id}/sentinel_rgb.jpg" if rgb_jpg_path and os.path.exists(rgb_jpg_path) else None
+        mask_url = f"/static/{request_id}/water_mask.png" if overlay_saved and os.path.exists(mask_overlay_path) else None
         rgb_tif_url = f"/static/{request_id}/sentinel_rgb.tif" if rgb_tif_path and os.path.exists(rgb_tif_path) else None
         ndwi_tif_url = f"/static/{request_id}/ndwi.tif" if ndwi_tif_path and os.path.exists(ndwi_tif_path) else None
 

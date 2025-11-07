@@ -67,7 +67,7 @@ class SentinelHubService:
 
         return config
 
-    async def download_sentinel_data(self, geometry_geojson, time_interval_days=(-30, 0), resolution=10, output_dir='.', date_iso: str | None = None, max_cloud: int | None = None):
+    async def download_sentinel_data(self, geometry_geojson, time_interval_days=(-30, 0), resolution=10, output_dir='.', date_iso: str | None = None, max_cloud: int | None = None, max_px: int | None = None):
         """
         Download Sentinel-2 data for the given GeoJSON geometry.
 
@@ -92,7 +92,8 @@ class SentinelHubService:
 
         # Calculate image size in pixels
         dims = bbox_to_dimensions(bbox_sh, resolution=resolution)
-        scale = (max(dims) / 2500.0) if max(dims) > 2500 else 1.0
+        limit = 2500 if (max_px is None or int(max_px) <= 0) else int(max_px)
+        scale = (max(dims) / float(limit)) if max(dims) > limit else 1.0
         size_px = (max(1, int(round(dims[0] / scale))), max(1, int(round(dims[1] / scale))))
 
         # Define the evalscript for true color RGB + NDWI
