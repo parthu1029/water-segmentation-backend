@@ -18,6 +18,12 @@ except Exception:
     Image = None
     PIL_AVAILABLE = False
 import io
+from ..core.config import settings
+import urllib.parse
+try:
+    import urllib.request as urlrequest
+except Exception:
+    urlrequest = None
 
 class ModelInference:
     """Handles model loading and inference for water segmentation"""
@@ -43,12 +49,31 @@ class ModelInference:
                 print("TensorFlow not available; skipping model load. Falling back to NDWI threshold.")
                 self.model = None
                 return
-            if not os.path.exists(self.model_path):
-                print(f"Warning: Model not found at {self.model_path}")
+            local_path = self.model_path
+            if isinstance(self.model_path, str) and self.model_path.startswith(("http://", "https://")):
+                try:
+                    parsed = urllib.parse.urlparse(self.model_path)
+                    fname = os.path.basename(parsed.path) or "model.keras"
+                    cache_dir = os.path.join(settings.DATA_DIR, "models")
+                    os.makedirs(cache_dir, exist_ok=True)
+                    local_path = os.path.join(cache_dir, fname)
+                    if not os.path.exists(local_path) and urlrequest is not None:
+                        req = urlrequest.Request(self.model_path)
+                        token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_TOKEN")
+                        if token:
+                            req.add_header("Authorization", f"Bearer {token}")
+                        with urlrequest.urlopen(req) as resp, open(local_path, "wb") as out:
+                            out.write(resp.read())
+                        print(f"Downloaded model to {local_path}")
+                except Exception as de:
+                    print(f"Model download failed: {de}")
+                    local_path = self.model_path
+            if not os.path.exists(local_path):
+                print(f"Warning: Model not found at {local_path}")
                 return
-                
-            self.model = tf.keras.models.load_model(self.model_path, compile=False)
-            print(f"Model loaded successfully from {self.model_path}")
+            
+            self.model = tf.keras.models.load_model(local_path, compile=False)
+            print(f"Model loaded successfully from {local_path}")
             self.model.summary()
             
         except Exception as e:
