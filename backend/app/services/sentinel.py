@@ -192,7 +192,7 @@ class SentinelHubService:
         }
         function evaluatePixel(s) {
             let valid = s.SCL !== 3 && s.SCL !== 9 && s.SCL !== 10 && s.dataMask === 1;
-            return [s.B04, s.B03, s.B02, valid ? 1 : 0];
+            return [s.B04 * 2.5, s.B03 * 2.5, s.B02 * 2.5, valid ? 1 : 0];
         }
         """
         evalscript_overlay = """
