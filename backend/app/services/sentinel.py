@@ -191,8 +191,14 @@ class SentinelHubService:
             return { input: ["B02","B03","B04","B08","SCL","dataMask"], output: { bands: 4 } };
         }
         function evaluatePixel(s) {
+            // Brightness + mild gamma to match SH visual true color
+            // Gain ~2.5 with gamma ~1/1.2, clamped to [0,1]
+            let r = Math.min(1.0, Math.pow(s.B04 * 2.5, 1.0/1.2));
+            let g = Math.min(1.0, Math.pow(s.B03 * 2.5, 1.0/1.2));
+            let b = Math.min(1.0, Math.pow(s.B02 * 2.5, 1.0/1.2));
+            // Mask clouds and ensure valid data only
             let valid = s.SCL !== 3 && s.SCL !== 9 && s.SCL !== 10 && s.dataMask === 1;
-            return [s.B04 * 2.5, s.B03 * 2.5, s.B02 * 2.5, valid ? 1 : 0];
+            return [r, g, b, valid ? 1 : 0];
         }
         """
         evalscript_overlay = """
