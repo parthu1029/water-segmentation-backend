@@ -156,6 +156,10 @@ class SentinelHubService:
             params['EVALSCRIPT'] = evalscript
         else:
             params['LAYERS'] = '1_TRUE_COLOR'
+        # If not using custom evalscript (i.e. default TRUE_COLOR), make image opaque to avoid fully transparent tiles
+        if not evalscript:
+            params['TRANSPARENT'] = 'FALSE'
+            params['BGCOLOR'] = 'FFFFFF'
         url = base + '?' + urlparse.urlencode(params)
         req = urlrequest.Request(url=url, headers={'Accept': 'image/png'})
         with urlrequest.urlopen(req) as resp:
@@ -278,7 +282,7 @@ class SentinelHubService:
                             got = True
                         except Exception:
                             got = False
-                    # Fallback: public WMS GetMap for true color (with evalscript)
+                    # Fallback: public WMS GetMap for true color (default layer)
                     if not got:
                         try:
                             img = self._process_wms_png((minx, miny, maxx, maxy), width, height, t_from, t_to, cc, None)
@@ -286,11 +290,23 @@ class SentinelHubService:
                             rgb_png_path = os.path.join(output_dir, 'sentinel_rgb.png')
                             with open(rgb_png_path, 'wb') as f:
                                 f.write(img)
+                            # Sanity check: ensure file is not trivially small
+                            try:
+                                if os.path.getsize(rgb_png_path) < 200:
+                                    rgb_png_path = None
+                                    raise ValueError('RGB WMS produced too small image')
+                            except Exception:
+                                raise
                             try:
                                 ov = self._process_wms_png((minx, miny, maxx, maxy), width, height, t_from, t_to, cc, evalscript_overlay)
                                 overlay_png_path = os.path.join(output_dir, 'water_mask.png')
                                 with open(overlay_png_path, 'wb') as f:
                                     f.write(ov)
+                                try:
+                                    if os.path.getsize(overlay_png_path) < 200:
+                                        overlay_png_path = None
+                                except Exception:
+                                    overlay_png_path = None
                             except Exception:
                                 overlay_png_path = None
                             acquisition_date = t_to
