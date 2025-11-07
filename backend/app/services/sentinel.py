@@ -27,9 +27,11 @@ except Exception:
 from datetime import datetime, timedelta
 try:
     from PIL import Image
+    from PIL import features as PIL_features
     PIL_AVAILABLE = True
 except Exception:
     Image = None
+    PIL_features = None
     PIL_AVAILABLE = False
 
 def _bounds_from_geojson(geometry_geojson):
@@ -304,18 +306,28 @@ class SentinelHubService:
                 rgba = np.dstack([rgb_uint8, alpha_uint8])
                 Image.fromarray(rgba, mode='RGBA').save(rgb_png_path)
 
-                # Try to save JPEG; if libjpeg is missing in the environment, skip gracefully
+                # Save JPEG only if libjpeg is supported by Pillow; otherwise skip
+                PIL_has_jpeg = False
                 try:
-                    rgb_jpg_path = os.path.join(output_dir, 'sentinel_rgb.jpg')
-                    Image.fromarray(rgb_uint8, mode='RGB').save(
-                        rgb_jpg_path,
-                        format='JPEG',
-                        quality=95,
-                        subsampling=0,
-                        optimize=True,
-                    )
-                except Exception as je:
-                    print(f"JPEG save failed (continuing without JPG): {je}")
+                    if PIL_features is not None:
+                        # Pillow feature key is 'jpg' or 'jpeg'; prefer 'jpg'
+                        PIL_has_jpeg = bool(PIL_features.check('jpg') or PIL_features.check('jpg_2000') or PIL_features.check('jpg2000'))
+                except Exception:
+                    PIL_has_jpeg = False
+                if PIL_has_jpeg:
+                    try:
+                        rgb_jpg_path = os.path.join(output_dir, 'sentinel_rgb.jpg')
+                        Image.fromarray(rgb_uint8, mode='RGB').save(
+                            rgb_jpg_path,
+                            format='JPEG',
+                            quality=95,
+                            subsampling=0,
+                            optimize=True,
+                        )
+                    except Exception as je:
+                        print(f"JPEG save failed (continuing without JPG): {je}")
+                        rgb_jpg_path = None
+                else:
                     rgb_jpg_path = None
 
             # Always save NDWI as .npy for environments without rasterio
