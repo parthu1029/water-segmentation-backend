@@ -60,10 +60,13 @@ class SentinelHubService:
     def __init__(self):
         self.client_id = os.getenv('SENTINEL_HUB_CLIENT_ID', '')
         self.client_secret = os.getenv('SENTINEL_HUB_CLIENT_SECRET', '')
+        # Public WMS instance (can be overridden via env)
+        self.wms_instance = os.getenv('SENTINEL_HUB_WMS_INSTANCE', 'ef5210ea-db25-42dc-afc1-b95646d1d02c')
 
     def _get_token(self) -> str:
         if not self.client_id or not self.client_secret:
             logger.warning("Sentinel Hub credentials not found. Set SENTINEL_HUB_CLIENT_ID and SENTINEL_HUB_CLIENT_SECRET.")
+            return ""
         if urlrequest is None:
             raise RuntimeError("urllib not available for HTTP requests")
         data = urlparse.urlencode({
@@ -124,6 +127,32 @@ class SentinelHubService:
                 'Accept': 'image/png'
             }
         )
+        with urlrequest.urlopen(req) as resp:
+            return resp.read()
+
+    def _process_wms_png(self, bbox: tuple, width: int, height: int, time_from: str, time_to: str, max_cloud: int | None):
+        if urlrequest is None or urlparse is None:
+            raise RuntimeError("urllib not available for HTTP requests")
+        base = f"https://services.sentinel-hub.com/ogc/wms/{self.wms_instance}"
+        params = {
+            'REQUEST': 'GetMap',
+            'LAYERS': '1_TRUE_COLOR',
+            'FORMAT': 'image/png',
+            'TRANSPARENT': 'TRUE',
+            'CRS': 'EPSG:4326',
+            'BBOX': f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}",
+            'WIDTH': str(int(max(1, width))),
+            'HEIGHT': str(int(max(1, height))),
+            'TIME': f"{time_from}/{time_to}",
+        }
+        if max_cloud is not None:
+            try:
+                v = max(0, min(100, int(max_cloud)))
+                params['MAXCC'] = str(v)
+            except Exception:
+                pass
+        url = base + '?' + urlparse.urlencode(params)
+        req = urlrequest.Request(url=url, headers={'Accept': 'image/png'})
         with urlrequest.urlopen(req) as resp:
             return resp.read()
 
@@ -213,20 +242,41 @@ class SentinelHubService:
                 t_to = base_dt.strftime('%Y-%m-%d')
                 tries = cc_list if cc_list else [100]
                 for cc in tries:
-                    try:
-                        img = self._process_png(token, (minx, miny, maxx, maxy), width, height, evalscript_truecolor, t_from, t_to, cc)
-                        os.makedirs(output_dir, exist_ok=True)
-                        rgb_png_path = os.path.join(output_dir, 'sentinel_rgb.png')
-                        with open(rgb_png_path, 'wb') as f:
-                            f.write(img)
-                        ov = self._process_png(token, (minx, miny, maxx, maxy), width, height, evalscript_overlay, t_from, t_to, cc)
-                        overlay_png_path = os.path.join(output_dir, 'water_mask.png')
-                        with open(overlay_png_path, 'wb') as f:
-                            f.write(ov)
-                        acquisition_date = t_to
+                    got = False
+                    # Try Process API if token available
+                    if token:
+                        try:
+                            img = self._process_png(token, (minx, miny, maxx, maxy), width, height, evalscript_truecolor, t_from, t_to, cc)
+                            os.makedirs(output_dir, exist_ok=True)
+                            rgb_png_path = os.path.join(output_dir, 'sentinel_rgb.png')
+                            with open(rgb_png_path, 'wb') as f:
+                                f.write(img)
+                            # Try overlay via Process API; failures are non-fatal
+                            try:
+                                ov = self._process_png(token, (minx, miny, maxx, maxy), width, height, evalscript_overlay, t_from, t_to, cc)
+                                overlay_png_path = os.path.join(output_dir, 'water_mask.png')
+                                with open(overlay_png_path, 'wb') as f:
+                                    f.write(ov)
+                            except Exception:
+                                overlay_png_path = None
+                            acquisition_date = t_to
+                            got = True
+                        except Exception:
+                            got = False
+                    # Fallback: public WMS GetMap for true color
+                    if not got:
+                        try:
+                            img = self._process_wms_png((minx, miny, maxx, maxy), width, height, t_from, t_to, cc)
+                            os.makedirs(output_dir, exist_ok=True)
+                            rgb_png_path = os.path.join(output_dir, 'sentinel_rgb.png')
+                            with open(rgb_png_path, 'wb') as f:
+                                f.write(img)
+                            acquisition_date = t_to
+                            got = True
+                        except Exception:
+                            got = False
+                    if got:
                         break
-                    except Exception:
-                        continue
                 if rgb_png_path:
                     break
         else:
@@ -254,20 +304,38 @@ class SentinelHubService:
                 t_to = end_date.strftime('%Y-%m-%d')
                 tries = cc_list if cc_list else [100]
                 for cc in tries:
-                    try:
-                        img = self._process_png(token, (minx, miny, maxx, maxy), width, height, evalscript_truecolor, t_from, t_to, cc)
-                        os.makedirs(output_dir, exist_ok=True)
-                        rgb_png_path = os.path.join(output_dir, 'sentinel_rgb.png')
-                        with open(rgb_png_path, 'wb') as f:
-                            f.write(img)
-                        ov = self._process_png(token, (minx, miny, maxx, maxy), width, height, evalscript_overlay, t_from, t_to, cc)
-                        overlay_png_path = os.path.join(output_dir, 'water_mask.png')
-                        with open(overlay_png_path, 'wb') as f:
-                            f.write(ov)
-                        acquisition_date = t_to
+                    got = False
+                    if token:
+                        try:
+                            img = self._process_png(token, (minx, miny, maxx, maxy), width, height, evalscript_truecolor, t_from, t_to, cc)
+                            os.makedirs(output_dir, exist_ok=True)
+                            rgb_png_path = os.path.join(output_dir, 'sentinel_rgb.png')
+                            with open(rgb_png_path, 'wb') as f:
+                                f.write(img)
+                            try:
+                                ov = self._process_png(token, (minx, miny, maxx, maxy), width, height, evalscript_overlay, t_from, t_to, cc)
+                                overlay_png_path = os.path.join(output_dir, 'water_mask.png')
+                                with open(overlay_png_path, 'wb') as f:
+                                    f.write(ov)
+                            except Exception:
+                                overlay_png_path = None
+                            acquisition_date = t_to
+                            got = True
+                        except Exception:
+                            got = False
+                    if not got:
+                        try:
+                            img = self._process_wms_png((minx, miny, maxx, maxy), width, height, t_from, t_to, cc)
+                            os.makedirs(output_dir, exist_ok=True)
+                            rgb_png_path = os.path.join(output_dir, 'sentinel_rgb.png')
+                            with open(rgb_png_path, 'wb') as f:
+                                f.write(img)
+                            acquisition_date = t_to
+                            got = True
+                        except Exception:
+                            got = False
+                    if got:
                         break
-                    except Exception:
-                        continue
                 if rgb_png_path:
                     break
 

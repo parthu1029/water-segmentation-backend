@@ -4,7 +4,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse
 import logging
 import uuid
 import contextvars
@@ -126,14 +126,18 @@ if settings.STORE_IN_DB:
         try:
             from app.db.connection import get_artifact
             row = get_artifact(request_id, filename)
-            if not row:
-                raise HTTPException(status_code=404, detail="Artifact not found")
-            content, content_type = row
-            return Response(content, media_type=content_type or "application/octet-stream")
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            if row:
+                content, content_type = row
+                return Response(content, media_type=content_type or "application/octet-stream")
+        except Exception:
+            pass
+        disk_path = os.path.join(settings.OUTPUT_DIR, request_id, filename)
+        try:
+            if os.path.exists(disk_path):
+                return FileResponse(disk_path)
+        except Exception:
+            pass
+        raise HTTPException(status_code=404, detail="Artifact not found")
 else:
     # Mount static files from configured output directory
     try:
