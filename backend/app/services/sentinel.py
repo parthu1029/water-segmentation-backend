@@ -304,8 +304,19 @@ class SentinelHubService:
                 rgba = np.dstack([rgb_uint8, alpha_uint8])
                 Image.fromarray(rgba, mode='RGBA').save(rgb_png_path)
 
-                rgb_jpg_path = os.path.join(output_dir, 'sentinel_rgb.jpg')
-                Image.fromarray(rgb_uint8, mode='RGB').save(rgb_jpg_path, format='JPEG', quality=95, subsampling=0, optimize=True)
+                # Try to save JPEG; if libjpeg is missing in the environment, skip gracefully
+                try:
+                    rgb_jpg_path = os.path.join(output_dir, 'sentinel_rgb.jpg')
+                    Image.fromarray(rgb_uint8, mode='RGB').save(
+                        rgb_jpg_path,
+                        format='JPEG',
+                        quality=95,
+                        subsampling=0,
+                        optimize=True,
+                    )
+                except Exception as je:
+                    print(f"JPEG save failed (continuing without JPG): {je}")
+                    rgb_jpg_path = None
 
             # Always save NDWI as .npy for environments without rasterio
             ndwi_npy_path = os.path.join(output_dir, 'ndwi.npy')
