@@ -31,6 +31,7 @@ class Settings(BaseSettings):
         "http://localhost:3000",  # React frontend default port
         "http://localhost:5173",  # Vite default port
         "http://localhost:8000",  # FastAPI backend default port
+        "https://*.vercel.app",
     ]
 
     # Sentinel Hub Configuration
