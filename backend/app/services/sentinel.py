@@ -31,7 +31,12 @@ except Exception:
     shp_shape = None
     SHAPELY_AVAILABLE = False
 from datetime import datetime, timedelta
-from PIL import Image
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except Exception:
+    Image = None
+    PIL_AVAILABLE = False
 import urllib.request as urlrequest
 import urllib.parse as urlparse
 
@@ -206,7 +211,7 @@ class SentinelHubService:
 
         acquisition_date = None
         data = None
-        sh_ready = bool(SH_AVAILABLE and self.config and os.getenv('SENTINEL_HUB_CLIENT_ID') and os.getenv('SENTINEL_HUB_CLIENT_SECRET') and RASTERIO_AVAILABLE)
+        sh_ready = bool(SH_AVAILABLE and self.config and os.getenv('SENTINEL_HUB_CLIENT_ID') and os.getenv('SENTINEL_HUB_CLIENT_SECRET') and RASTERIO_AVAILABLE and PIL_AVAILABLE)
 
         if date_iso and sh_ready:
             # Preferred end date is the provided date
